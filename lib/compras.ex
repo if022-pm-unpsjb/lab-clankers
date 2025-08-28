@@ -1,7 +1,7 @@
 defmodule Libremarket.Compras do
 
   def comprar() do
-    :show_me_the_money
+    Libremarket.Infracciones.detectarInfraccion()
   end
 
 end
@@ -33,7 +33,7 @@ defmodule Libremarket.Compras.Server do
   """
   @impl true
   def init(state) do
-    {:ok, state}
+    {:ok, %{}}
   end
 
   @doc """
