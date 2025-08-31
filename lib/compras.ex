@@ -1,7 +1,8 @@
 defmodule Libremarket.Compras do
 
-  def comprar() do
-    Libremarket.Infracciones.detectarInfraccion()
+  def comprar(id_compra) do
+    Libremarket.Infracciones.Server.detectarInfraccion(id_compra)
+    Libremarket.Pagos.Server.autorizarPago(id_compra)
   end
 
 end
@@ -22,8 +23,8 @@ defmodule Libremarket.Compras.Server do
     GenServer.start_link(__MODULE__, opts, name: __MODULE__)
   end
 
-  def comprar(pid \\ __MODULE__) do
-    GenServer.call(pid, :comprar)
+  def comprar(pid \\ __MODULE__, id_compra) do
+    GenServer.call(pid, {:comprar, id_compra})
   end
 
   # Callbacks
@@ -40,9 +41,10 @@ defmodule Libremarket.Compras.Server do
   Callback para un call :comprar
   """
   @impl true
-  def handle_call(:comprar, _from, state) do
-    result = Libremarket.Compras.comprar
-    {:reply, result, state}
+  def handle_call({:comprar, id_compra}, _from, state) do
+    compra = Libremarket.Compras.comprar(id_compra)
+    new_state = Map.put(state, id_compra, compra)
+    {:reply, compra, new_state}
   end
 
 end
