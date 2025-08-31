@@ -1,11 +1,16 @@
 defmodule Libremarket.Envios do
 
-    def calcular_envio(forma_entrega) do
-        case forma_entrega do
-          :retira -> 0
-          :correo -> :rand.uniform(100)
-        end
+    def calcularEnvio(forma_entrega) do
+      costo =
+      case forma_entrega do
+        :retira -> 0
+        :correo -> :rand.uniform(10000)
       end
+
+      IO.puts("El costo del envío es: #{costo}")
+
+      costo
+    end
 
 end
 

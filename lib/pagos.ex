@@ -1,7 +1,12 @@
 defmodule Libremarket.Pagos do
 
   def autorizarPago() do
-    :rand.uniform(100) < 70 
+
+  pago_autorizado = :rand.uniform(100) < 70
+
+  IO.puts("Pago autorizado: #{pago_autorizado}")
+
+  pago_autorizado
   end
 
 end
