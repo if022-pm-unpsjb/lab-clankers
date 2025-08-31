@@ -7,12 +7,24 @@ defmodule Libremarket.Compras do
     ## Libremarket.Ventas.Server.reservarProducto(producto) # agregar PRINT cuando se reserve un producto en reservarProducto(producto)!
 
     Libremarket.Infracciones.Server.detectarInfraccion(id_compra)
-
     #si hay infraccion
-    #Libremarket.Ventas.Server.liberarProducto(producto)
-    Libremarket.Pagos.Server.autorizarPago(id_compra)
+      # Informar infraccion
+      #Libremarket.Ventas.Server.liberarProducto(producto)
+      # pkill
 
-  end
+    Libremarket.Pagos.Server.autorizarPago(id_compra)
+    #si no se autoriza el pago
+      #informar pago rechazado      
+      # liberar reserva del producto
+      # pkill
+    
+    #si forma_entrega == :correo
+      # agendar envio
+      # enviar producto
+
+    # Confirmar compra exitosa
+
+    end
 
 end
 
@@ -33,10 +45,10 @@ defmodule Libremarket.Compras.Server do
   def init(_opts), do: {:ok, %{}}
 
   @impl true
-  def handle_call({:comprar, {producto, medio_pago, forma_entrega}}, _from, state) do
+  def handle_call({:comprar, {nro_producto, medio_pago, forma_entrega}}, _from, state) do
     id_compra = :erlang.unique_integer([:positive])
 
-    compra = Libremarket.Compras.comprar(id_compra, producto, medio_pago, forma_entrega)
+    compra = Libremarket.Compras.comprar(id_compra, nro_producto, medio_pago, forma_entrega)
 
     new_state = Map.put(state, id_compra, compra)
     {:reply, compra, new_state}

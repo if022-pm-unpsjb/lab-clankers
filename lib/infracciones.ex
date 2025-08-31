@@ -2,7 +2,7 @@ defmodule Libremarket.Infracciones do
 
   def detectarInfraccion() do
 
-    hay_infraccion = :rand.uniform(100) > 50
+    hay_infraccion = :rand.uniform(100) < 30
 
     IO.puts("Hay infraccion: #{hay_infraccion}")
 
