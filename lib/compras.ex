@@ -9,32 +9,41 @@ defmodule Libremarket.Compras do
     compra_confirmada
   end
   
-  def comprar(id_compra, nro_producto, medio_pago, forma_entrega) do
-    IO.puts("Se eligió el producto: #{nro_producto}")
+  def comprar(id_compra, id_producto, medio_pago, forma_entrega) do
+    IO.puts("Se eligió el producto: #{id_producto}")
 
-    Libremarket.Envios.Server.calcularEnvio({id_compra, forma_entrega})
+    costo = Libremarket.Envios.Server.calcularEnvio({id_compra, forma_entrega})
 
     confirmacion = confirmarCompra(id_compra)
-    Libremarket.Ventas.Server.reservarProducto(nro_producto)
+    
+    estado_reserva = Libremarket.Ventas.Server.reservarProducto(id_producto)
+    if estado_reserva == :sin_stock do
+      IO.puts("Producto #{id_producto} no disponible. Cancelando compra...") 
+      # no liberamos el producto porque nunca se reservó
+      # pkill
+    end
 
     infraccion = Libremarket.Infracciones.Server.detectarInfraccion(id_compra)
-    #si hay infraccion
-      # Informar infraccion
-      #Libremarket.Ventas.Server.liberarProducto(producto)
+
+    if infraccion do
+      IO.puts("Infraccion detectada. Cancelando compra...")
+      Libremarket.Ventas.Server.liberarProducto(id_producto)
       # pkill
+    end
 
     autorizacionPago = Libremarket.Pagos.Server.autorizarPago(id_compra)
-    #si no se autoriza el pago
-      #informar pago rechazado      
-      # liberar reserva del producto
+    if !autorizacionPago do
+      IO.puts("Pago no autorizado. Cancelando compra...")
+      Libremarket.Ventas.Server.liberarProducto(id_producto)
       # pkill
-    
-    #si forma_entrega == :correo
-      # agendar envio
-      # enviar producto
+    end
 
-    # Confirmar compra exitosa
-    {:ok, %{nro_producto: nro_producto, medio_pago: medio_pago, forma_entrega: forma_entrega, confirmacion: confirmacion, infraccion: infraccion, autorizacionPago: autorizacionPago}}
+    if forma_entrega == :correo do
+      Libremarket.Envios.Server.agendarEnvio({id_compra, costo})
+      # enviar producto (preguntar)
+    end
+
+    {:ok, %{id_producto: id_producto, medio_pago: medio_pago, forma_entrega: forma_entrega, confirmacion: confirmacion, infraccion: infraccion, autorizacionPago: autorizacionPago}}
 
     end
 
@@ -61,10 +70,10 @@ defmodule Libremarket.Compras.Server do
   def init(_opts), do: {:ok, %{}}
 
   @impl true
-  def handle_call({:comprar, {nro_producto, medio_pago, forma_entrega}}, _from, state) do
+  def handle_call({:comprar, {id_producto, medio_pago, forma_entrega}}, _from, state) do
     id_compra = :erlang.unique_integer([:positive])
 
-    datos_compra = Libremarket.Compras.comprar(id_compra, nro_producto, medio_pago, forma_entrega)
+    datos_compra = Libremarket.Compras.comprar(id_compra, id_producto, medio_pago, forma_entrega)
 
     new_state = Map.put(state, id_compra, datos_compra)
     {:reply, datos_compra, new_state}

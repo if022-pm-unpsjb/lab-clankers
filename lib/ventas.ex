@@ -1,5 +1,24 @@
 defmodule Libremarket.Ventas do
 
+  def reservarProducto(id_producto, map_productos) do
+    case Map.get(map_productos, id_producto) do
+      0 ->
+        IO.puts("Producto #{id_producto} sin stock.--------------------------------------------------")
+        :sin_stock
+
+      stock ->
+        nuevo_state = Map.update!(map_productos, id_producto, &(&1 - 1))
+        IO.puts("Producto #{id_producto} reservado. Stock restante: #{nuevo_state[id_producto]}")
+        nuevo_state
+    end
+  end
+
+  def liberarProducto(id_producto, state) do
+    new_state = Map.update!(state, id_producto, &(&1 + 1))
+    IO.puts("Producto #{id_producto} liberado. Stock actual: #{new_state[id_producto]}")
+    new_state
+  end
+
 end
 
 defmodule Libremarket.Ventas.Server do
@@ -26,6 +45,10 @@ defmodule Libremarket.Ventas.Server do
     GenServer.call(pid, :listarProductos)
   end
 
+  def liberarProducto(pid \\ __MODULE__, id_producto) do
+    GenServer.call(pid, {:liberarProducto, id_producto})
+  end
+
   # Callbacks
 
   @doc """
@@ -38,21 +61,24 @@ defmodule Libremarket.Ventas.Server do
     |> Enum.map(fn id -> {id, :rand.uniform(10)} end)
     |> Enum.into(%{})
 
-  IO.puts("Productos iniciales: #{inspect(productos)}")
   {:ok, productos}
   end
 
- @impl true
+  @impl true
   def handle_call({:reservarProducto, id_producto}, _from, state) do
-    case Map.get(state, id_producto) do
-      0 ->
-        {:reply, {:error, :sin_stock}, state}
+    case Libremarket.Ventas.reservarProducto(id_producto, state) do
+      :sin_stock ->
+        {:reply, :sin_stock, state}
 
-      stock ->
-        nuevo_state = Map.update!(state, id_producto, &(&1 - 1))
-        IO.puts("Producto #{id_producto} reservado. Stock restante: #{nuevo_state[id_producto]}")
-        {:reply, {:ok, nuevo_state}, nuevo_state}
+      new_state ->
+        {:reply, new_state, new_state}
     end
+  end
+
+    @impl true
+  def handle_call({:liberarProducto, id_producto}, _from, state) do
+    new_state = Libremarket.Ventas.liberarProducto(id_producto, state)
+    {:reply, new_state, new_state}
   end
 
   @impl true
