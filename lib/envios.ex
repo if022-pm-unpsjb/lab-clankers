@@ -30,8 +30,12 @@ defmodule Libremarket.Envios.Server do
     GenServer.start_link(__MODULE__, opts, name: __MODULE__)
   end
 
-  def calcularEnvio(pid \\ __MODULE__, forma_entrega) do
-    GenServer.call(pid, {:calcularEnvio, forma_entrega})
+  def calcularEnvio(pid \\ __MODULE__, {id_compra, forma_entrega}) do
+    GenServer.call(pid, {:calcularEnvio, {id_compra, forma_entrega}})
+  end
+
+  def listarEnvios(pid \\ __MODULE__) do
+    GenServer.call(pid, :listarEnvios)
   end
 
   # Callbacks
@@ -48,10 +52,17 @@ defmodule Libremarket.Envios.Server do
   Callback para un call :comprar
   """
   @impl true
-  def handle_call({:calcularEnvio, forma_entrega}, _from, state) do
-    envio = Libremarket.Envios.calcularEnvio(forma_entrega)
-    new_state = Map.put(state, forma_entrega, envio)
-    {:reply, envio, new_state}
+  def handle_call({:calcularEnvio, {id_compra, forma_entrega}}, _from, state) do
+    id_envio = :erlang.unique_integer([:positive])
+
+    costo = Libremarket.Envios.calcularEnvio(forma_entrega)
+    new_state = Map.put(state, id_envio, %{id_compra: id_compra, forma_entrega: forma_entrega, costo: costo})
+    {:reply, costo, new_state}
+  end
+
+  @impl true
+  def handle_call(:listarEnvios, _from, state) do
+    {:reply, state, state}
   end
 
 end
