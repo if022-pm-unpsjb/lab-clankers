@@ -13,7 +13,8 @@ defmodule Libremarket.Supervisor do
     children = [
       Libremarket.Compras.Server,
       Libremarket.Infracciones.Server,
-      Libremarket.Pagos.Server
+      Libremarket.Pagos.Server,
+      Libremarket.Envios.Server
     ]
 
     Supervisor.init(children, strategy: :one_for_one)
