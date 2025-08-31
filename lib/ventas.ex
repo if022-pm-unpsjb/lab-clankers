@@ -29,7 +29,7 @@ defmodule Libremarket.Ventas.Server do
   Inicializa el estado del servidor
   """
   @impl true
-  def init(_state) do
+  def init(state) do
   productos =
     1..10
     |> Enum.map(fn id -> {id, :rand.uniform(10)} end)

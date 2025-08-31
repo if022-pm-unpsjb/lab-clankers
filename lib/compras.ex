@@ -1,8 +1,17 @@
 defmodule Libremarket.Compras do
   def comprar(id_compra, producto, medio_pago, forma_entrega) do
+    IO.puts("Se eligió el producto: #{producto}")
+
     Libremarket.Envios.Server.calcularEnvio(forma_entrega)
+    ## Libremarket.Compras.Server.confirmarCompra(id_compra)
+    ## Libremarket.Ventas.Server.reservarProducto(producto) # agregar PRINT cuando se reserve un producto en reservarProducto(producto)!
+
     Libremarket.Infracciones.Server.detectarInfraccion(id_compra)
+
+    #si hay infraccion
+    #Libremarket.Ventas.Server.liberarProducto(producto)
     Libremarket.Pagos.Server.autorizarPago(id_compra)
+
   end
 
 end
