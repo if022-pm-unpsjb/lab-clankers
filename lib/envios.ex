@@ -63,7 +63,7 @@ defmodule Libremarket.Envios.Server do
 
   @impl true
   def handle_call({:calcularEnvio, {id_compra, :retira}}, _from, state) do
-    {:reply, :ok, state}
+    {:reply, 0, state}
   end
 
   @impl true
