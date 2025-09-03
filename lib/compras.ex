@@ -1,80 +1,93 @@
 defmodule Libremarket.Compras do
+  # ==== API principal ====
+  def comprar(id_compra, id_producto, medio_pago, forma_entrega) do
+    IO.puts("Se eligió el producto: #{id_producto}")
 
-  def confirmarCompra() do
+    # Paso 1: inicialización de datos de compra
+    resultado_base = inicializar_compra(id_compra, id_producto, medio_pago, forma_entrega)
 
-    compra_confirmada = :rand.uniform(100) < 80
+    # Paso 2: reservar producto
+    case Libremarket.Ventas.Server.reservarProducto(id_producto) do
+      :sin_stock ->
+        IO.puts("Producto #{id_producto} no disponible. Cancelando compra...")
+        {:error, resultado_base}
 
-    IO.puts("Compra confirmada: #{compra_confirmada}")
+      _ ->
+        # Paso 3: chequeo de infracción
+        case chequear_infraccion(id_compra, id_producto, resultado_base) do
+          {:error, resultado} ->
+            {:error, resultado}
 
-    compra_confirmada
+          {:ok, resultado_infraccion} ->
+            # Paso 4: autorización de pago
+            {:ok, autorizar_pago(id_compra, id_producto, forma_entrega, resultado_infraccion)}
+        end
+    end
   end
 
-def comprar(id_compra, id_producto, medio_pago, forma_entrega) do
-  IO.puts("Se eligió el producto: #{id_producto}")
+  # ==== Paso 1: inicialización ====
+  defp inicializar_compra(id_compra, id_producto, medio_pago, forma_entrega) do
+    precio_producto = Libremarket.Ventas.Server.get_precio(id_producto)
+    costo_envio = Libremarket.Envios.Server.calcularEnvio({id_compra, forma_entrega})
+    precio_total = precio_producto + costo_envio
 
-  # obtengo el precio del producto desde Ventas.Server
-  precio_producto = Libremarket.Ventas.Server.get_precio(id_producto)
+    %{
+      id_producto: id_producto,
+      medio_pago: medio_pago,
+      forma_entrega: forma_entrega,
+      precio_producto: precio_producto,
+      precio_envio: costo_envio,
+      precio_total: precio_total,
+      infraccion: nil,
+      autorizacionPago: nil
+    }
+  end
 
-  costo_envio = Libremarket.Envios.Server.calcularEnvio({id_compra, forma_entrega})
-
-  estado_reserva = Libremarket.Ventas.Server.reservarProducto(id_producto)
-
-  precio_total = precio_producto + costo_envio
-
-  # base del resultado con todas las claves
-  resultado = %{
-    id_producto: id_producto,
-    medio_pago: medio_pago,
-    forma_entrega: forma_entrega,
-    precio_producto: precio_producto,
-    precio_envio: costo_envio,
-    precio_total: precio_total,
-    infraccion: nil,
-    autorizacionPago: nil
-  }
-
-  if estado_reserva == :sin_stock do
-    IO.puts("Producto #{id_producto} no disponible. Cancelando compra...")
-    {:ok, resultado}
-
-  else
+  # ==== Paso 2: chequeo de infracción ====
+  defp chequear_infraccion(id_compra, id_producto, resultado) do
     infraccion = Libremarket.Infracciones.Server.detectarInfraccion(id_compra)
 
     if infraccion do
       IO.puts("Infracción detectada. Cancelando compra...")
       Libremarket.Ventas.Server.liberarProducto(id_producto)
-
-      {:ok, Map.put(resultado, :infraccion, true)}
-
+      {:error, Map.put(resultado, :infraccion, true)}
     else
-      autorizacionPago = Libremarket.Pagos.Server.autorizarPago(id_compra)
-
-      if !autorizacionPago do
-        IO.puts("Pago no autorizado. Cancelando compra...")
-        Libremarket.Ventas.Server.liberarProducto(id_producto)
-
-        {:ok,
-         resultado
-         |> Map.put(:infraccion, false)
-         |> Map.put(:autorizacionPago, false)}
-
-      else
-        if forma_entrega == :correo do
-          Libremarket.Envios.Server.agendarEnvio({id_compra, costo_envio})
-        end
-
-        {:ok,
-         resultado
-         |> Map.put(:infraccion, false)
-         |> Map.put(:autorizacionPago, true)}
-      end
+      {:ok, Map.put(resultado, :infraccion, false)}
     end
   end
+
+  # ==== Paso 3: autorización de pago ====
+  defp autorizar_pago(id_compra, id_producto, forma_entrega, resultado) do
+    autorizacionPago = Libremarket.Pagos.Server.autorizarPago(id_compra)
+
+    cond do
+      autorizacionPago == false ->
+        IO.puts("Pago no autorizado. Cancelando compra...")
+        Libremarket.Ventas.Server.liberarProducto(id_producto)
+        resultado
+        |> Map.put(:autorizacionPago, false)
+
+      autorizacionPago == true ->
+        if forma_entrega == :correo do
+          Libremarket.Envios.Server.agendarEnvio({id_compra, resultado.precio_envio})
+        end
+
+        resultado
+        |> Map.put(:autorizacionPago, true)
+
+      true ->
+        resultado
+    end
+  end
+
+  # ==== Confirmación aleatoria ====
+  def confirmarCompra() do
+    compra_confirmada = :rand.uniform(100) < 80
+    IO.puts("Compra confirmada: #{compra_confirmada}")
+    compra_confirmada
+  end
+
 end
-
-
-
-end #end def_module
 
 defmodule Libremarket.Compras.Server do
   use GenServer
