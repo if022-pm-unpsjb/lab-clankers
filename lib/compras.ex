@@ -25,6 +25,33 @@ defmodule Libremarket.Compras do
     end
   end
 
+  def comprar_timed(id_compra, id_producto, medio_pago, forma_entrega) do
+    IO.puts("Se eligió el producto: #{id_producto}")
+    :timer.sleep(:rand.uniform(1000))
+
+    # Paso 1: inicialización de datos de compra
+    resultado_base = inicializar_compra(id_compra, id_producto, medio_pago, forma_entrega)
+    :timer.sleep(:rand.uniform(1000))
+
+    # Paso 2: reservar producto
+    case Libremarket.Ventas.Server.reservarProducto(id_producto) do
+      :sin_stock ->
+        IO.puts("Producto #{id_producto} no disponible. Cancelando compra...")
+        {:error, resultado_base}
+
+      _ ->
+        # Paso 3: chequeo de infracción
+        case chequear_infraccion(id_compra, id_producto, resultado_base) do
+          {:error, resultado} ->
+            {:error, resultado}
+
+          {:ok, resultado_infraccion} ->
+            # Paso 4: autorización de pago
+            {:ok, autorizar_pago(id_compra, id_producto, forma_entrega, resultado_infraccion)}
+        end
+    end
+  end
+
   # ==== Paso 1: inicialización ====
   defp inicializar_compra(id_compra, id_producto, medio_pago, forma_entrega) do
     precio_producto = Libremarket.Ventas.Server.get_precio(id_producto)
@@ -101,6 +128,10 @@ defmodule Libremarket.Compras.Server do
     GenServer.call(pid, {:comprar, datos_compra})
   end
 
+  def comprar_timed(pid \\ __MODULE__, datos_compra) do
+    GenServer.call(pid, {:comprar_timed, datos_compra}, 15_000)
+  end
+
   def confirmarCompra(pid \\ __MODULE__) do
     GenServer.call(pid, :confirmarCompra)
   end
@@ -118,6 +149,16 @@ defmodule Libremarket.Compras.Server do
     id_compra = :erlang.unique_integer([:positive])
 
     datos_compra = Libremarket.Compras.comprar(id_compra, id_producto, medio_pago, forma_entrega)
+
+    new_state = Map.put(state, id_compra, datos_compra)
+    {:reply, datos_compra, new_state}
+  end
+
+  @impl true
+  def handle_call({:comprar_timed, {id_producto, medio_pago, forma_entrega}}, _from, state) do
+    id_compra = :erlang.unique_integer([:positive])
+
+    datos_compra = Libremarket.Compras.comprar_timed(id_compra, id_producto, medio_pago, forma_entrega)
 
     new_state = Map.put(state, id_compra, datos_compra)
     {:reply, datos_compra, new_state}
