@@ -13,12 +13,19 @@ stop() {
     docker compose down
 }
 
+restart(){
+    stop
+    start
+}
+
 # Comprobar el argumento proporcionado
 if [[ $1 == "start" ]]; then
     shift
     start "$@"
 elif [[ $1 == "stop" ]]; then
     stop
+elif [[ $1 == "restart" ]]; then
+    restart
 elif [[ $1 == "iex" ]]; then
     docker attach $2
 else
