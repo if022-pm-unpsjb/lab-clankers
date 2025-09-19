@@ -45,28 +45,30 @@ defmodule Libremarket.Ventas.Server do
 
   use GenServer
 
+  @global_name {:global, __MODULE__}
+
   # API del cliente
 
   @doc """
   Crea un nuevo servidor de Ventas
   """
   def start_link(opts \\ %{}) do
-    GenServer.start_link(__MODULE__, opts, name: __MODULE__)
+    GenServer.start_link(__MODULE__, opts, name: @global_name)
   end
 
-  def reservarProducto(pid \\ __MODULE__, id_producto) do
+  def reservarProducto(pid \\ @global_name, id_producto) do
     GenServer.call(pid, {:reservarProducto, id_producto})
   end
 
-  def listarProductos(pid \\ __MODULE__) do
+  def listarProductos(pid \\ @global_name) do
     GenServer.call(pid, :listarProductos)
   end
 
-  def liberarProducto(pid \\ __MODULE__, id_producto) do
+  def liberarProducto(pid \\ @global_name, id_producto) do
     GenServer.call(pid, {:liberarProducto, id_producto})
   end
 
-  def get_precio(pid \\ __MODULE__, id_producto) do
+  def get_precio(pid \\ @global_name, id_producto) do
     GenServer.call(pid, {:get_precio, id_producto})
   end
 

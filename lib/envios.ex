@@ -21,24 +21,26 @@ defmodule Libremarket.Envios.Server do
 
   use GenServer
 
+  @global_name {:global, __MODULE__}
+
   # API del cliente
 
   @doc """
   Crea un nuevo servidor de Envios
   """
   def start_link(opts \\ %{}) do
-    GenServer.start_link(__MODULE__, opts, name: __MODULE__)
+    GenServer.start_link(__MODULE__, opts, name: @global_name)
   end
 
-  def calcularEnvio(pid \\ __MODULE__, datos_compra) do
+  def calcularEnvio(pid \\ @global_name, datos_compra) do
     GenServer.call(pid, {:calcularEnvio, datos_compra})
   end
 
-  def listarEnvios(pid \\ __MODULE__) do
+  def listarEnvios(pid \\ @global_name) do
     GenServer.call(pid, :listarEnvios)
   end
 
-  def agendarEnvio(pid \\ __MODULE__, datos_compra) do
+  def agendarEnvio(pid \\ @global_name, datos_compra) do
     GenServer.call(pid, {:agendarEnvio, datos_compra})
   end
 
