@@ -10,10 +10,10 @@ services:
       SERVER_TO_RUN: Elixir.Libremarket.Compras.Server
       MIX_HOME: /app/mix_home
       HEX_HOME: /app/hex_home
-    command: elixir --sname simulador --cookie ${SECRET} -S mix run --no-halt --no-compile    # para habilitar -it
-    # # para habilitar -it
-    # stdin_open: true
-    # tty: true
+    command: iex --sname simulador --cookie secret -S mix
+    # para habilitar -it
+    stdin_open: true
+    tty: true
     user: "${DOCKER_UID}:${DOCKER_GID}"
 
   infracciones:
@@ -27,10 +27,10 @@ services:
       MIX_HOME: /app/mix_home
       HEX_HOME: /app/hex_home
       SERVER_TO_RUN: Elixir.Libremarket.Infracciones.Server
-    command: elixir --sname infracciones --cookie ${SECRET} -S mix run --no-halt --no-compile    # para habilitar -it
-    # # para habilitar -it
-    # stdin_open: true
-    # tty: true
+    command: iex --sname infracciones --cookie secret -S mix
+    # para habilitar -it
+    stdin_open: true
+    tty: true
     user: "${DOCKER_UID}:${DOCKER_GID}"
 
   compras:
@@ -44,10 +44,10 @@ services:
       MIX_HOME: /app/mix_home
       HEX_HOME: /app/hex_home
       SERVER_TO_RUN: Elixir.Libremarket.Compras.Server
-    command: elixir --sname compras --cookie ${SECRET} -S mix run --no-halt --no-compile    # para habilitar -it
+    command: iex --sname compras --cookie secret -S mix
     # para habilitar -it
-    # stdin_open: true
-    # tty: true
+    stdin_open: true
+    tty: true
     user: "${DOCKER_UID}:${DOCKER_GID}"
 
   envios:
@@ -61,10 +61,10 @@ services:
       MIX_HOME: /app/mix_home
       HEX_HOME: /app/hex_home
       SERVER_TO_RUN: Elixir.Libremarket.Envios.Server
-    command: elixir --sname envios --cookie ${SECRET} -S mix run --no-halt --no-compile    # para habilitar -it
+    command: iex --sname envios --cookie secret -S mix
     # para habilitar -it
-    # stdin_open: true
-    # tty: true
+    stdin_open: true
+    tty: true
     user: "${DOCKER_UID}:${DOCKER_GID}"
 
   ventas:
@@ -78,10 +78,10 @@ services:
       MIX_HOME: /app/mix_home
       HEX_HOME: /app/hex_home
       SERVER_TO_RUN: Elixir.Libremarket.Ventas.Server
-    command: elixir --sname ventas --cookie ${SECRET} -S mix run --no-halt --no-compile    # para habilitar -it
+    command: iex --sname ventas --cookie secret -S mix
     # para habilitar -it
-    # stdin_open: true
-    # tty: true
+    stdin_open: true
+    tty: true
     user: "${DOCKER_UID}:${DOCKER_GID}"
 
   pagos:
@@ -95,8 +95,8 @@ services:
       MIX_HOME: /app/mix_home
       HEX_HOME: /app/hex_home
       SERVER_TO_RUN: Elixir.Libremarket.Pagos.Server
-    command: elixir --sname pagos --cookie ${SECRET} -S mix run --no-halt --no-compile    # para habilitar -it
+    command: iex --sname pagos --cookie secret -S mix
     # para habilitar -it
-    # stdin_open: true
-    # tty: true
+    stdin_open: true
+    tty: true
     user: "${DOCKER_UID}:${DOCKER_GID}"

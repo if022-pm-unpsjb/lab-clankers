@@ -160,6 +160,10 @@ defmodule Libremarket.Compras.Server do
     GenServer.call(pid, :listarCompras)
   end
 
+  def obtener(pid \\ @global_name, id_compra) do
+    GenServer.call(pid, {:obtener_compra, id_compra})
+  end
+
   # Callbacks
   @impl true
   def init(_opts), do: {:ok, %{}}
@@ -193,6 +197,14 @@ defmodule Libremarket.Compras.Server do
   def handle_call(:confirmarCompra, _from, state) do
     resultado = Libremarket.Compras.confirmarCompra()
     {:reply, resultado, state}
+  end
+
+  @impl true
+  def handle_call({:obtener_compra, id_compra}, _from, state) do
+    case Map.fetch(state, id_compra) do
+      {:ok, datos} -> {:reply, {:ok, %{id_compra: id_compra, resultado: datos}}, state}
+      :error       -> {:reply, {:error, :not_found}, state}
+    end
   end
 
 end
