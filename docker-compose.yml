@@ -100,3 +100,20 @@ services:
     stdin_open: true
     tty: true
     user: "${DOCKER_UID}:${DOCKER_GID}"
+
+  rest:
+    image: elixir:alpine
+    container_name: rest
+    volumes:
+      - ./:/app
+    working_dir: /app
+    network_mode: "host"
+    environment:
+      MIX_HOME: /app/mix_home
+      HEX_HOME: /app/hex_home
+      SERVER_TO_RUN: Elixir.Rest.Server
+    command: iex --sname rest --cookie secret -S mix
+    # para habilitar -it
+    stdin_open: true
+    tty: true
+    user: "${DOCKER_UID}:${DOCKER_GID}"

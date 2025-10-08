@@ -10,7 +10,6 @@ defmodule Rest.Server do
     )
   end
 end
-
 defmodule Rest do
   @moduledoc """
   API REST (Plug) para orquestar compras sin tocar el módulo Compras.

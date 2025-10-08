@@ -22,7 +22,7 @@ defmodule Libremarket.Supervisor do
         config: [
           port: 45892,
           if_addr: "0.0.0.0",
-          multicast_addr: "192.168.0.255",
+          multicast_addr: "192.168.40.96",
           broadcast_only: true,
           secret: "secret"
         ]
@@ -31,17 +31,10 @@ defmodule Libremarket.Supervisor do
 
     # server_to_run = [String.to_existing_atom(System.get_env("SERVER_TO_RUN"))]
 
-
-    rest_child =
-      case System.get_env("ENABLE_REST") do
-        "true" -> [Rest.Server]
-        _ -> []
-      end
-
     childrens =
       [
         {Cluster.Supervisor, [topologies, [name: Libremarket.ClusterSupervisor]]}
-      ] ++ server_to_run ++ rest_child
+      ] ++ server_to_run
 
     Supervisor.init(childrens, strategy: :one_for_one)
   end
