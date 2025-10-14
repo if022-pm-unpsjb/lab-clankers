@@ -1,6 +1,6 @@
 services:
   simulador:
-    image: elixir:alpine
+    image: elixir:1.15.7-otp-26-alpine
     container_name: simulador
     volumes:
       - ./:/app
@@ -10,14 +10,16 @@ services:
       SERVER_TO_RUN: Elixir.Libremarket.Compras.Server
       MIX_HOME: /app/mix_home
       HEX_HOME: /app/hex_home
-    command: iex --sname simulador --cookie secret -S mix
-    # para habilitar -it
+      AMQP_URL: amqps://oiawxlbc:v4Z6nPfJiy01FZw3QmObwAPPz90bs8t-@jackal.rmq.cloudamqp.com/oiawxlbc
+      INSECURE_AMQPS: "1"
+    command: 
+      elixir --sname simulador --cookie ${SECRET} -S mix run --no-halt --no-compile    # para habilitar -it    # para habilitar -it
     stdin_open: true
     tty: true
     user: "${DOCKER_UID}:${DOCKER_GID}"
 
   infracciones:
-    image: elixir:alpine
+    image: elixir:1.15.7-otp-26-alpine
     container_name: infracciones
     volumes:
       - ./:/app
@@ -27,14 +29,16 @@ services:
       MIX_HOME: /app/mix_home
       HEX_HOME: /app/hex_home
       SERVER_TO_RUN: Elixir.Libremarket.Infracciones.Server
-    command: iex --sname infracciones --cookie secret -S mix
-    # para habilitar -it
+      AMQP_URL: amqps://oiawxlbc:v4Z6nPfJiy01FZw3QmObwAPPz90bs8t-@jackal.rmq.cloudamqp.com/oiawxlbc
+      INSECURE_AMQPS: "1"
+    command: 
+      elixir --sname infracciones --cookie ${SECRET} -S mix run --no-halt --no-compile 
     stdin_open: true
     tty: true
     user: "${DOCKER_UID}:${DOCKER_GID}"
 
   compras:
-    image: elixir:alpine
+    image: elixir:1.15.7-otp-26-alpine
     container_name: compras
     volumes:
       - ./:/app
@@ -44,14 +48,16 @@ services:
       MIX_HOME: /app/mix_home
       HEX_HOME: /app/hex_home
       SERVER_TO_RUN: Elixir.Libremarket.Compras.Server
-    command: iex --sname compras --cookie secret -S mix
-    # para habilitar -it
-    stdin_open: true
+      AMQP_URL: amqps://oiawxlbc:v4Z6nPfJiy01FZw3QmObwAPPz90bs8t-@jackal.rmq.cloudamqp.com/oiawxlbc
+      INSECURE_AMQPS: "1"
+    # 👇 instalamos certificados antes de arrancar iex
+    command: 
+      elixir --sname compras --cookie ${SECRET} -S mix run --no-halt --no-compile 
     tty: true
     user: "${DOCKER_UID}:${DOCKER_GID}"
 
   envios:
-    image: elixir:alpine
+    image: elixir:1.15.7-otp-26-alpine
     container_name: envios
     volumes:
       - ./:/app
@@ -61,14 +67,16 @@ services:
       MIX_HOME: /app/mix_home
       HEX_HOME: /app/hex_home
       SERVER_TO_RUN: Elixir.Libremarket.Envios.Server
-    command: iex --sname envios --cookie secret -S mix
-    # para habilitar -it
+      AMQP_URL: amqps://oiawxlbc:v4Z6nPfJiy01FZw3QmObwAPPz90bs8t-@jackal.rmq.cloudamqp.com/oiawxlbc
+      INSECURE_AMQPS: "1"
+    command: 
+      elixir --sname envios --cookie ${SECRET} -S mix run --no-halt --no-compile 
     stdin_open: true
     tty: true
     user: "${DOCKER_UID}:${DOCKER_GID}"
 
   ventas:
-    image: elixir:alpine
+    image: elixir:1.15.7-otp-26-alpine
     container_name: ventas
     volumes:
       - ./:/app
@@ -78,14 +86,16 @@ services:
       MIX_HOME: /app/mix_home
       HEX_HOME: /app/hex_home
       SERVER_TO_RUN: Elixir.Libremarket.Ventas.Server
-    command: iex --sname ventas --cookie secret -S mix
-    # para habilitar -it
+      AMQP_URL: amqps://oiawxlbc:v4Z6nPfJiy01FZw3QmObwAPPz90bs8t-@jackal.rmq.cloudamqp.com/oiawxlbc
+      INSECURE_AMQPS: "1"
+    command: 
+      elixir --sname ventas --cookie ${SECRET} -S mix run --no-halt --no-compile 
     stdin_open: true
     tty: true
     user: "${DOCKER_UID}:${DOCKER_GID}"
 
   pagos:
-    image: elixir:alpine
+    image: elixir:1.15.7-otp-26-alpine
     container_name: pagos
     volumes:
       - ./:/app
@@ -95,14 +105,16 @@ services:
       MIX_HOME: /app/mix_home
       HEX_HOME: /app/hex_home
       SERVER_TO_RUN: Elixir.Libremarket.Pagos.Server
-    command: iex --sname pagos --cookie secret -S mix
-    # para habilitar -it
+      AMQP_URL: amqps://oiawxlbc:v4Z6nPfJiy01FZw3QmObwAPPz90bs8t-@jackal.rmq.cloudamqp.com/oiawxlbc
+      INSECURE_AMQPS: "1"
+    command: 
+      elixir --sname pagos --cookie ${SECRET} -S mix run --no-halt --no-compile    # para habilitar -it# para habilitar -ithabilitar -it    # para habilitar -it    # para habilitar -it
     stdin_open: true
     tty: true
     user: "${DOCKER_UID}:${DOCKER_GID}"
 
   rest:
-    image: elixir:alpine
+    image: elixir:1.15.7-otp-26-alpine
     container_name: rest
     volumes:
       - ./:/app
@@ -112,8 +124,10 @@ services:
       MIX_HOME: /app/mix_home
       HEX_HOME: /app/hex_home
       SERVER_TO_RUN: Elixir.Rest.Server
-    command: iex --sname rest --cookie secret -S mix
-    # para habilitar -it
+      AMQP_URL: amqps://oiawxlbc:v4Z6nPfJiy01FZw3QmObwAPPz90bs8t-@jackal.rmq.cloudamqp.com/oiawxlbc
+      INSECURE_AMQPS: "1"
+    command: 
+      elixir --sname rest --cookie ${SECRET} -S mix run --no-halt --no-compile    # para habilitar -it# para habilitar -ithabilitar -it
     stdin_open: true
     tty: true
     user: "${DOCKER_UID}:${DOCKER_GID}"

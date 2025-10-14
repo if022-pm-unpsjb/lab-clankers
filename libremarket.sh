@@ -1,37 +1,54 @@
 #!/bin/bash
 
+IMAGE="elixir:1.15.7-otp-26-alpine"
+
 start() {
-    # Levantar los contenedores en segundo plano
-    export SECRET=secret
-    export DOCKER_UID=$UID
-    export DOCKER_GID=$GID
-    docker compose up -d "$@"
+  export SECRET=secret
+  export DOCKER_UID=$(id -u)
+  export DOCKER_GID=$(id -g)
+  docker compose up -d "$@"
 }
 
 stop() {
-    export SECRET=secret
-    export DOCKER_UID=$UID
-    export DOCKER_GID=$GID
-    docker compose down
+  export SECRET=secret
+  export DOCKER_UID=$(id -u)
+  export DOCKER_GID=$(id -g)
+  docker compose down
 }
 
-restart(){
-    stop
-    start
+restart(){ stop; start; }
+
+clean() {
+  # Limpio artefactos en el host (montados en /app dentro del contenedor)
+  rm -rf _build deps mix_home hex_home build_path rebar_cache .rebar3
+  # (opcional) evitar usar la tag flotante por accidente
+  docker rmi elixir:alpine 2>/dev/null || true
+  docker pull "$IMAGE"
 }
 
 if [[ $1 == "start" ]]; then
-    shift
-    start "$@"
+  shift; start "$@"
 elif [[ $1 == "stop" ]]; then
-    stop
-elif [[ $1 == "build" ]]; then
-    docker run -it --rm -v "$(pwd)":/app -w /app -u $(id -u):$(id -g) -e MIX_HOME=/app/mix_home -e HEX_HOME=/app/hex_home --network host elixir:alpine mix compile
+  stop
 elif [[ $1 == "restart" ]]; then
-    restart
+  restart
+elif [[ $1 == "clean" ]]; then
+  clean
+elif [[ $1 == "build" ]]; then
+  docker run -it --rm \
+    -v "$(pwd)":/app -w /app \
+    -u $(id -u):$(id -g) \
+    -e MIX_HOME=/app/mix_home \
+    -e HEX_HOME=/app/hex_home \
+    -e REBAR_CACHE_DIR=/app/rebar_cache \
+    -e REBAR_PROFILE=dev \
+    -e MIX_ENV=dev \
+    --network host \
+    "$IMAGE" \
+    sh -lc 'mix local.hex --force && mix local.rebar --force && mix deps.get && mix deps.compile --force && mix compile'
 elif [[ $1 == "iex" ]]; then
-    docker attach $2
+  docker attach "$2"
 else
-    echo "Uso: $0 {start|stop|iex nombre_de_contenedor}"
-    exit 1
-fi 
+  echo "Uso: $0 {start|stop|restart|clean|build|iex nombre_de_contenedor}"
+  exit 1
+fi

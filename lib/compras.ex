@@ -141,6 +141,7 @@ end
 
 defmodule Libremarket.Compras.Server do
   use GenServer
+  require Logger
   alias AMQP.{Connection, Channel, Queue, Basic}
 
   @global_name {:global, __MODULE__}
@@ -149,33 +150,26 @@ defmodule Libremarket.Compras.Server do
   @req_q  "infracciones.req"   # hacia Infracciones
   @resp_q "compras.resp"       # respuestas para Compras
 
-  # API
+  # ========== API ==========
   def start_link(opts \\ %{}) do
     GenServer.start_link(__MODULE__, opts, name: @global_name)
   end
 
-  def comprar(pid \\ @global_name, datos_compra) do
-    GenServer.call(pid, {:comprar, datos_compra})
-  end
+  def comprar(pid \\ @global_name, datos_compra),
+    do: GenServer.call(pid, {:comprar, datos_compra})
 
-  def comprar_timed(pid \\ @global_name, datos_compra) do
-    GenServer.call(pid, {:comprar_timed, datos_compra}, 15_000)
-  end
+  def comprar_timed(pid \\ @global_name, datos_compra),
+    do: GenServer.call(pid, {:comprar_timed, datos_compra}, 15_000)
 
-  def confirmarCompra(pid \\ @global_name) do
-    GenServer.call(pid, :confirmarCompra)
-  end
+  def confirmarCompra(pid \\ @global_name),
+    do: GenServer.call(pid, :confirmarCompra)
 
-  def listarCompras(pid \\ @global_name) do
-    GenServer.call(pid, :listarCompras)
-  end
+  def listarCompras(pid \\ @global_name),
+    do: GenServer.call(pid, :listarCompras)
 
-  def obtener(pid \\ @global_name, id_compra) do
-    GenServer.call(pid, {:obtener_compra, id_compra})
-  end
+  def obtener(pid \\ @global_name, id_compra),
+    do: GenServer.call(pid, {:obtener_compra, id_compra})
 
-
-   # ===== NUEVA API: RPC a Infracciones por AMQP =====
   @doc """
   Publica pedido en #{@req_q} y espera respuesta en #{@resp_q}.
   Retorna {:ok, %{id_compra: id, infraccion: bool}} o {:error, :timeout}
@@ -184,43 +178,47 @@ defmodule Libremarket.Compras.Server do
     GenServer.call(pid, {:rpc_infraccion, id_compra, timeout_ms}, timeout_ms + 1000)
   end
 
-  # Callbacks
+  # ========== Callbacks ==========
   @impl true
   def init(_opts) do
     Process.flag(:trap_exit, true)
     {:ok, chan} = connect_amqp!()
+
     # Declarar colas (idempotente)
     Queue.declare(chan, @req_q,  durable: false)
     Queue.declare(chan, @resp_q, durable: false)
-    # Consumir respuestas (no_ack: true porque sólo reenviamos al cliente esperando)
+
+    # Consumir respuestas (no_ack: true porque solo reenviamos al cliente esperando)
     {:ok, _ctag} = Basic.consume(chan, @resp_q, nil, no_ack: true)
-    # Estado: canal amqp + mapa de esperas por correlation_id
+
+    # Estado: canal amqp + mapa de esperas por correlation_id + compras
     {:ok, %{chan: chan, waiting: %{}, compras: %{}}}
   end
 
   @impl true
   def handle_call({:comprar, {id_producto, medio_pago, forma_entrega}}, _from, state) do
     id_compra = :erlang.unique_integer([:positive])
-
     datos_compra = Libremarket.Compras.comprar(id_compra, id_producto, medio_pago, forma_entrega)
 
-    new_state = Map.put(state, id_compra, datos_compra)
+    # ✅ guardar bajo :compras (no en la raíz)
+    new_state = %{state | compras: Map.put(state.compras, id_compra, datos_compra)}
     {:reply, datos_compra, new_state}
   end
 
   @impl true
   def handle_call({:comprar_timed, {id_producto, medio_pago, forma_entrega}}, _from, state) do
     id_compra = :erlang.unique_integer([:positive])
-
     datos_compra = Libremarket.Compras.comprar_timed(id_compra, id_producto, medio_pago, forma_entrega)
 
-    new_state = Map.put(state, id_compra, datos_compra)
+    # ✅ idem
+    new_state = %{state | compras: Map.put(state.compras, id_compra, datos_compra)}
     {:reply, datos_compra, new_state}
   end
 
   @impl true
   def handle_call(:listarCompras, _from, state) do
-    {:reply, state, state}
+    # ✅ devolver solo el mapa de compras
+    {:reply, state.compras, state}
   end
 
   @impl true
@@ -231,13 +229,14 @@ defmodule Libremarket.Compras.Server do
 
   @impl true
   def handle_call({:obtener_compra, id_compra}, _from, state) do
-    case Map.fetch(state, id_compra) do
+    # ✅ buscar en state.compras
+    case Map.fetch(state.compras, id_compra) do
       {:ok, datos} -> {:reply, {:ok, %{id_compra: id_compra, resultado: datos}}, state}
       :error       -> {:reply, {:error, :not_found}, state}
     end
   end
 
-   # ===== NUEVO: publicar pedido y registrar espera =====
+  # ===== Publicar pedido y registrar espera (RPC) =====
   @impl true
   def handle_call({:rpc_infraccion, id_compra, timeout_ms}, from, %{chan: chan, waiting: waiting} = s) do
     corr = make_cid()
@@ -253,7 +252,7 @@ defmodule Libremarket.Compras.Server do
     {:noreply, %{s | waiting: Map.put(waiting, corr, {from, tref})}}
   end
 
-  # ===== NUEVO: recibir respuestas desde compras.resp =====
+  # ===== Recibir respuestas desde compras.resp =====
   @impl true
   def handle_info({:basic_deliver, payload, %{correlation_id: cid}}, %{waiting: waiting} = s) do
     case Map.pop(waiting, cid) do
@@ -263,6 +262,7 @@ defmodule Libremarket.Compras.Server do
 
       {{from, tref}, waiting2} ->
         Process.cancel_timer(tref)
+
         reply =
           case Jason.decode(payload) do
             {:ok, %{"id_compra" => id, "infraccion" => infr}} ->
@@ -270,12 +270,13 @@ defmodule Libremarket.Compras.Server do
             _ ->
               {:error, :bad_payload}
           end
+
         GenServer.reply(from, reply)
         {:noreply, %{s | waiting: waiting2}}
     end
   end
 
-  # ===== NUEVO: timeout del RPC =====
+  # ===== Timeout del RPC =====
   @impl true
   def handle_info({:rpc_timeout, cid}, %{waiting: waiting} = s) do
     case Map.pop(waiting, cid) do
@@ -286,15 +287,18 @@ defmodule Libremarket.Compras.Server do
     end
   end
 
-  # Re-conexión básica si se cae la conexión AMQP
+  # ===== AMQP administración y fallback =====
   @impl true
-  def handle_info({:DOWN, _mref, :process, _pid, _reason}, state) do
-    {:ok, chan} = reconnect_amqp!()
-    # re-suscribir consumidor de respuestas
-    Queue.declare(chan, @resp_q, durable: false)
-    Basic.consume(chan, @resp_q, nil, no_ack: true)
-    {:noreply, %{state | chan: chan}}
-  end
+  def handle_info({:basic_consume_ok, _}, state), do: {:noreply, state}
+
+  @impl true
+  def handle_info({:basic_cancel, _}, state), do: {:stop, :normal, state}
+
+  @impl true
+  def handle_info({:basic_cancel_ok, _}, state), do: {:noreply, state}
+
+  @impl true
+  def handle_info(_msg, state), do: {:noreply, state}
 
   # ===== Helpers AMQP =====
   defp connect_amqp!() do
@@ -311,5 +315,4 @@ defmodule Libremarket.Compras.Server do
 
   defp make_cid(),
     do: :erlang.unique_integer([:monotonic, :positive]) |> Integer.to_string()
-
 end
