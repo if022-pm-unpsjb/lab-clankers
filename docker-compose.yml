@@ -1,22 +1,4 @@
 services:
-  simulador:
-    image: elixir:1.15.7-otp-26-alpine
-    container_name: simulador
-    volumes:
-      - ./:/app
-    working_dir: /app
-    network_mode: "host"
-    environment:
-      SERVER_TO_RUN: Elixir.Libremarket.Compras.Server
-      MIX_HOME: /app/mix_home
-      HEX_HOME: /app/hex_home
-      AMQP_URL: amqps://oiawxlbc:v4Z6nPfJiy01FZw3QmObwAPPz90bs8t-@jackal.rmq.cloudamqp.com/oiawxlbc
-      INSECURE_AMQPS: "1"
-    command: 
-      elixir --sname simulador --cookie ${SECRET} -S mix run --no-halt --no-compile    # para habilitar -it    # para habilitar -it
-    stdin_open: true
-    tty: true
-    user: "${DOCKER_UID}:${DOCKER_GID}"
 
   infracciones:
     image: elixir:1.15.7-otp-26-alpine
@@ -49,7 +31,6 @@ services:
       HEX_HOME: /app/hex_home
       SERVER_TO_RUN: Elixir.Libremarket.Compras.Server
       AMQP_URL: amqps://oiawxlbc:v4Z6nPfJiy01FZw3QmObwAPPz90bs8t-@jackal.rmq.cloudamqp.com/oiawxlbc
-      INSECURE_AMQPS: "1"
     # 👇 instalamos certificados antes de arrancar iex
     command: 
       elixir --sname compras --cookie ${SECRET} -S mix run --no-halt --no-compile 

@@ -174,7 +174,11 @@ defmodule Libremarket.Compras.Server do
   Publica pedido en #{@req_q} y espera respuesta en #{@resp_q}.
   Retorna {:ok, %{id_compra: id, infraccion: bool}} o {:error, :timeout}
   """
-  def detectar_infraccion_amqp(pid \\ @global_name, id_compra, timeout_ms \\ 5_000) do
+  def detectar_infraccion_amqp(id_compra, timeout_ms \\ 5_000) do
+    detectar_infraccion_amqp(@global_name, id_compra, timeout_ms)
+  end
+
+  def detectar_infraccion_amqp(pid, id_compra, timeout_ms) do
     GenServer.call(pid, {:rpc_infraccion, id_compra, timeout_ms}, timeout_ms + 1000)
   end
 
@@ -303,7 +307,7 @@ defmodule Libremarket.Compras.Server do
   # ===== Helpers AMQP =====
   defp connect_amqp!() do
     url = System.fetch_env!("AMQP_URL")
-    {:ok, conn} = Connection.open(url)
+    {:ok, conn} = Connection.open(url,ssl_options: [verify: :verify_none])
     Process.monitor(conn.pid)
     Channel.open(conn)
   end

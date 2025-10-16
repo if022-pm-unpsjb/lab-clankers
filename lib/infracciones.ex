@@ -8,8 +8,6 @@ defmodule Libremarket.Infracciones do
     infraccion?
   end
 end
-
-
 defmodule Libremarket.Infracciones.Server do
   @moduledoc "Infracciones"
   use GenServer
@@ -19,6 +17,9 @@ defmodule Libremarket.Infracciones.Server do
   @global_name {:global, __MODULE__}
   @req_q  "infracciones.req"
   @resp_q "compras.resp"
+
+  @min_backoff 500
+  @max_backoff 10_000
 
   # ===== API cliente =====
   def start_link(opts \\ %{}) do
@@ -34,23 +35,46 @@ defmodule Libremarket.Infracciones.Server do
   # ===== Callbacks =====
   @impl true
   def init(_opts) do
-    {:ok, chan} = connect_amqp!()
-
-    # Declaramos colas (idempotente)
-    {:ok, _} = Queue.declare(chan, @req_q,  durable: false)
-    {:ok, _} = Queue.declare(chan, @resp_q, durable: false)
-
-    # Consumimos pedidos que llegan a infracciones.req
-    {:ok, _ctag} = Basic.consume(chan, @req_q, nil, no_ack: true)
-
-    {:ok, %{chan: chan}}
+    Process.flag(:trap_exit, true)
+    state = %{conn: nil, chan: nil, backoff: @min_backoff}
+    # conectamos en diferido para no romper init
+    send(self(), :connect)
+    {:ok, state}
   end
 
-  # Llega un mensaje con el pedido: {:basic_deliver, payload, meta}
+  @impl true
+  def handle_info(:connect, %{backoff: backoff} = state) do
+    case connect_amqp() do
+      {:ok, conn, chan} ->
+        Logger.info("Infracciones.Server conectado a AMQP")
+        # Declaraciones idempotentes
+        {:ok, _} = Queue.declare(chan, @req_q,  durable: false)
+        {:ok, _} = Queue.declare(chan, @resp_q, durable: false)
+        {:ok, _ctag} = Basic.consume(chan, @req_q, nil, no_ack: true)
+        Process.monitor(conn.pid)
+        {:noreply, %{state | conn: conn, chan: chan, backoff: @min_backoff}}
+
+      {:error, reason} ->
+        Logger.warning("AMQP no conectado (#{inspect(reason)}). Reintento en #{backoff} ms")
+        Process.send_after(self(), :connect, backoff)
+        {:noreply, %{state | conn: nil, chan: nil, backoff: min(backoff * 2, @max_backoff)}}
+    end
+  end
+
+  # Si la conexión/chán se cae, reconectamos
+  @impl true
+  def handle_info({:DOWN, _mref, :process, _pid, reason}, state) do
+    Logger.warning("AMQP DOWN: #{inspect(reason)}. Reintentando...")
+    safe_close(state.chan)
+    safe_close(state.conn)
+    Process.send_after(self(), :connect, @min_backoff)
+    {:noreply, %{state | conn: nil, chan: nil, backoff: @min_backoff}}
+  end
+
+  # Mensaje de negocio
   @impl true
   def handle_info({:basic_deliver, payload, meta}, %{chan: chan} = state)
-      when is_binary(payload) and is_map(meta) do
-    # meta.correlation_id lo re-enviamos tal cual
+      when is_binary(payload) and is_map(meta) and not is_nil(chan) do
     cid = Map.get(meta, :correlation_id)
 
     case Jason.decode(payload) do
@@ -71,17 +95,18 @@ defmodule Libremarket.Infracciones.Server do
     {:noreply, state}
   end
 
-  # Mensajes administrativos del consumer
-  @impl true
-  def handle_info({:basic_consume_ok, %{consumer_tag: _}}, state), do: {:noreply, state}
+  # Si aún no hay canal, descartamos
+  def handle_info({:basic_deliver, _p, _m}, state) do
+    Logger.debug("Mensaje recibido pero sin canal; descartado.")
+    {:noreply, state}
+  end
 
+  @impl true
+  def handle_info({:basic_consume_ok, _}, state), do: {:noreply, state}
   @impl true
   def handle_info({:basic_cancel, _}, state), do: {:stop, :normal, state}
-
   @impl true
   def handle_info({:basic_cancel_ok, _}, state), do: {:noreply, state}
-
-  # Fallback para no romper si llega otra cosa
   @impl true
   def handle_info(msg, state) do
     Logger.debug("Infracciones.Server ignoró: #{inspect(msg)}")
@@ -89,14 +114,49 @@ defmodule Libremarket.Infracciones.Server do
   end
 
   # ===== Helpers AMQP =====
-  defp connect_amqp!() do
-    url = System.fetch_env!("AMQP_URL")
-    with {:ok, conn} <- Connection.open(url),
-         {:ok, chan} <- Channel.open(conn) do
-      {:ok, chan}
-    else
-      error ->
-        raise "No se pudo conectar a AMQP: #{inspect(error)}"
+
+  # Conexión "insegura" si INSECURE_AMQPS=1 y la URL es amqps:// (sin CA)
+  defp connect_amqp() do
+    with {:ok, url} <- fetch_amqp_url() do
+      insecure? = System.get_env("INSECURE_AMQPS") in ["1", "true", "TRUE"]
+      opts =
+        [connection_timeout: 15_000, requested_heartbeat: 30]
+        |> maybe_insecure_ssl(url, insecure?)
+
+      case Connection.open(url, opts) do
+        {:ok, conn} ->
+          case Channel.open(conn) do
+            {:ok, chan} -> {:ok, conn, chan}
+            {:error, reason} ->
+              safe_close(conn)
+              {:error, reason}
+          end
+
+        {:error, reason} ->
+          {:error, reason}
+      end
     end
   end
+
+  defp maybe_insecure_ssl(opts, url, true) do
+    # sólo si es amqps://
+    if String.starts_with?(url, "amqps://") do
+      # desactiva verificación de certificado/hostname (evita instalar CA)
+      Keyword.merge(opts, ssl_options: [verify: :verify_none, server_name_indication: :disable])
+    else
+      opts
+    end
+  end
+  defp maybe_insecure_ssl(opts, _url, _), do: opts
+
+  defp fetch_amqp_url() do
+    case System.get_env("AMQP_URL") |> to_string() |> String.trim() do
+      "" -> {:error, :missing_amqp_url}
+      url -> {:ok, url}
+    end
+  end
+
+  defp safe_close(%Channel{} = ch), do: Channel.close(ch)
+  defp safe_close(%Connection{} = c), do: Connection.close(c)
+  defp safe_close(_), do: :ok
 end
