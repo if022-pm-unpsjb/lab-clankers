@@ -26,15 +26,7 @@ clean() {
   docker pull "$IMAGE"
 }
 
-if [[ $1 == "start" ]]; then
-  shift; start "$@"
-elif [[ $1 == "stop" ]]; then
-  stop
-elif [[ $1 == "restart" ]]; then
-  restart
-elif [[ $1 == "clean" ]]; then
-  clean
-elif [[ $1 == "build" ]]; then
+build() {
   docker run -it --rm \
     -v "$(pwd)":/app -w /app \
     -u $(id -u):$(id -g) \
@@ -46,9 +38,31 @@ elif [[ $1 == "build" ]]; then
     --network host \
     "$IMAGE" \
     sh -lc 'mix local.hex --force && mix local.rebar --force && mix deps.get && mix deps.compile --force && mix compile'
+}
+
+nuke() {
+  # stop -> clean -> build -> start (reenvía args a start, p.ej. servicios)
+  stop
+  clean
+  build
+  start "$@"
+}
+
+if [[ $1 == "start" ]]; then
+  shift; start "$@"
+elif [[ $1 == "stop" ]]; then
+  stop
+elif [[ $1 == "restart" ]]; then
+  restart
+elif [[ $1 == "clean" ]]; then
+  clean
+elif [[ $1 == "build" ]]; then
+  build
+elif [[ $1 == "nuke" ]]; then
+  shift; nuke "$@"
 elif [[ $1 == "iex" ]]; then
   docker attach "$2"
 else
-  echo "Uso: $0 {start|stop|restart|clean|build|iex nombre_de_contenedor}"
+  echo "Uso: $0 {start|stop|restart|clean|build|nuke|iex nombre_de_contenedor}"
   exit 1
 fi

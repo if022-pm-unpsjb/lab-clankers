@@ -4,22 +4,16 @@ defmodule Libremarket.Ui do
     if Libremarket.Compras.Server.confirmarCompra() do
       id_compra = Libremarket.Compras.Server.inicializarCompra()
 
-      with  {:ok, _} <- Libremarket.Compras.Server.seleccionarProducto(id_compra, id_producto),
-            {:ok, _} <- Libremarket.Compras.Server.seleccionarMedioPago(id_compra, medio_de_pago),
-            {:ok, _} <- Libremarket.Compras.Server.seleccionarFormaEntrega(id_compra, forma_de_entrega)
+      with  {:ok, _} <- Libremarket.Compras.Server.seleccionarProducto({id_compra, id_producto}),
+            {:ok, _} <- Libremarket.Compras.Server.seleccionarMedioPago({id_compra, medio_de_pago}),
+            {:ok, _} <- Libremarket.Compras.Server.seleccionarFormaEntrega({id_compra, forma_de_entrega}),
+            {:ok, _} <- Libremarket.Compras.Server.detectarInfraccion(id_compra),
+            {:ok, _} <- Libremarket.Compras.Server.autorizarPago(id_compra)
       do
-        with
-          {:ok, _} <- Libremarket.Compras.Server.verificarInfraccion(id_compra)
-          {:ok, _} <- Libremarket.Compras.Server.autorizarPago(id_compra)
-        do
-          funcionfina(id_compra, 25, 200)
-        else
-          {:error, razon} -> {:error, razon}
-          otro -> {:error, {:unexpected_return, otro}}
-        end
+        obtenerCompra(id_compra, 25, 200)
       else
         {:error, razon} -> {:error, razon}
-        otro -> {:error, {:unexpected_return, otro}}
+        otro            -> {:error, {:unexpected_return, otro}}
       end
     else
       {:error, :compra_no_confirmada}
@@ -27,14 +21,14 @@ defmodule Libremarket.Ui do
   end
 
 # Reintenta si recibe :en_proceso (timeout total = max_intentos * delay_ms)
-  defp funcionfinal(id_compra, max_intentos, delay_ms) when max_intentos >= 0 do
-    case Libremarket.Compras.comprar.(id_compra) do
+  defp obtenerCompra(id_compra, max_intentos, delay_ms) when max_intentos >= 0 do
+    case Libremarket.Compras.Server.obtenerCompra(id_compra) do
       {:ok, compra}   -> {:ok, compra}
       {:error, razon} -> {:error, razon}
       :en_proceso     ->
         if max_intentos == 0, do: {:error, :timeout_compra}, else: (
           Process.sleep(delay_ms)
-          await_compra(id_compra, fun, max_intentos - 1, delay_ms)
+          obtenerCompra(id_compra, max_intentos - 1, delay_ms)
         )
       otro -> {:error, {:unexpected_return, otro}}
     end
