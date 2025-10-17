@@ -1,6 +1,6 @@
 defmodule Libremarket.Ui do
 
- def comprar(id_producto, medio_de_pago, forma_de_entrega) do
+  def comprar(id_producto, medio_de_pago, forma_de_entrega) do
     if Libremarket.Compras.Server.confirmarCompra() do
       id_compra = Libremarket.Compras.Server.inicializarCompra()
 
