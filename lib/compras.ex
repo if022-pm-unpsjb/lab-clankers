@@ -1,9 +1,9 @@
 defmodule Libremarket.Compras do
 
-  def node_ventas(), do: :"ventas@equipoalan"
-  def node_pagos(), do: :"pagos@equipoalan"
-  def node_envios(), do: :"envios@equipoalan"
-  def node_infracciones(), do: :"infracciones@equipoalan"
+  #def node_ventas(), do: :"ventas@equipoalan"
+  #def node_pagos(), do: :"pagos@equipoalan"
+  #def node_envios(), do: :"envios@equipoalan"
+  #def node_infracciones(), do: :"infracciones@equipoalan"
 
   # ==== API principal ====
   def comprar(id_compra, id_producto, medio_pago, forma_entrega) do
