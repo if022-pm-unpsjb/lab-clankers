@@ -1,5 +1,7 @@
 defmodule Libremarket.Compras do
 
+  require Logger
+
   def confirmarCompra() do
     compra_confirmada = :rand.uniform(100) < 80
     IO.puts("Compra confirmada: #{compra_confirmada}")
@@ -70,24 +72,26 @@ defmodule Libremarket.Compras do
 
 
   def seleccionar_producto_state(state, {id_compra, id_producto}) do
-    with {:ok, {status, compra}} <- Map.fetch(state.compras, id_compra),
-         %{} <- Libremarket.Ventas.Server.reservarProducto(id_producto) do
-      precio = Libremarket.Ventas.Server.get_precio(id_producto)
+    case Map.fetch(state.compras, id_compra) do
+      {:ok, {status, compra}} ->
+        compra2 =
+          compra
+          |> Map.put(:id_producto, id_producto)
+          |> Map.put(:precio_producto, nil)
+          |> Map.put(:reservado, nil)    # <- aún no sabemos si reservó
 
-      compra2 =
-        compra
-        |> Map.put(:id_producto, id_producto)
-        |> Map.put(:precio_producto, precio)
+        new_state = %{state | compras: Map.put(state.compras, id_compra, {status, compra2})}
 
-      new_state = %{state | compras: Map.put(state.compras, id_compra, {status, compra2})}
-      {{:ok, {status, compra2}}, new_state}
-    else
-      :error     -> {{:error, :not_found}, state}
-      :no_existe -> {{:error, :no_existe}, state}
-      :sin_stock -> {{:error, :sin_stock}, state}
-      other      -> {{:error, other}, state}
+        # fire-and-forget hacia Ventas
+        _ = Libremarket.Compras.Server.reservar_producto_amqp(id_compra, id_producto, 5_000)
+
+        {{:ok, {status, compra2}}, new_state}
+
+      :error ->
+        {{:error, :not_found}, state}
     end
   end
+
 
   def seleccionar_medio_pago_state(state, {id_compra, medio_pago}) do
     case Map.fetch(state.compras, id_compra) do
@@ -106,17 +110,19 @@ defmodule Libremarket.Compras do
       {:ok, {status, compra}} ->
         case forma_entrega do
           :correo ->
-            costo_envio = Libremarket.Envios.Server.calcularEnvio({id_compra, :correo})
-
             compra2 =
               compra
               |> Map.put(:forma_entrega, :correo)
-              |> Map.put(:precio_envio, costo_envio)
+              |> Map.put(:precio_envio, nil)    # ← lo completa la respuesta AMQP
+
+            # 🔸 Disparo asíncrono a Envios (calcular)
+            _ = Libremarket.Compras.Server.calcular_envio_amqp(id_compra, :correo, 5_000)
 
             new_state = %{state | compras: Map.put(state.compras, id_compra, {status, compra2})}
             {{:ok, {status, compra2}}, new_state}
 
           :retira ->
+            # si querés que retira sea inmediato y sin AMQP (0)
             compra2 =
               compra
               |> Map.put(:forma_entrega, :retira)
@@ -133,6 +139,7 @@ defmodule Libremarket.Compras do
         {{:error, :not_found}, state}
     end
   end
+
 end
 
 
@@ -148,6 +155,8 @@ defmodule Libremarket.Compras.Server do
 
   @req_infr_q  "infracciones.req"
   @req_pago_q  "pagos.req"
+  @req_ventas_q "ventas.req"
+  @req_env_q   "envios.req"
   @resp_q      "compras.resp"
 
   # ========== API ==========
@@ -202,6 +211,23 @@ defmodule Libremarket.Compras.Server do
     do: GenServer.cast(pid, {:rpc_pago_async, id_compra, timeout_ms})
 
 
+  def reservar_producto_amqp(id_compra, id_producto, timeout_ms \\ 5_000) do
+    GenServer.cast(@global_name, {:rpc_reserva_async, id_compra, id_producto, timeout_ms})
+  end
+
+  def reservar_producto_amqp(pid, id_compra, id_producto, timeout_ms) do
+    GenServer.cast(pid, {:rpc_reserva_async, id_compra, id_producto, timeout_ms})
+  end
+
+    # Publicar "calcular" (correo o retira)
+  def calcular_envio_amqp(id_compra, forma_entrega, timeout_ms \\ 5_000),
+    do: GenServer.cast(@global_name, {:rpc_envio_calcular_async, id_compra, forma_entrega, timeout_ms})
+
+  # Publicar "agendar"
+  def agendar_envio_amqp(id_compra, costo, timeout_ms \\ 5_000),
+    do: GenServer.cast(@global_name, {:rpc_envio_agendar_async, id_compra, costo, timeout_ms})
+
+
   # ============== HANDLE CALL ===================
 
   @impl true
@@ -254,44 +280,45 @@ defmodule Libremarket.Compras.Server do
   @impl true
   def handle_call({:obtenerCompra, id_compra}, _from, state) do
     case Map.fetch(state.compras, id_compra) do
-      {:ok, {_estado_guardado, info}} ->
+      {:ok, {estado_guardado, info}} ->
         info1 = Map.put_new(info, :id_compra, id_compra)
 
-        # Si falta algún campo => sigue en proceso
-        required = [:id_compra, :precio_producto, :precio_envio, :autorizacionPago, :id_producto, :infraccion, :forma_entrega, :medio_pago]
-        if Enum.any?(required, fn k -> is_nil(Map.get(info1, k)) end) do
-          {:reply, :en_proceso, state}
+        # si ya marcamos :error (ej: sin_stock/no_existe/timeout_reserva) devolvelo ya
+        if estado_guardado == :error do
+          {:reply, {:error, info1}, state}
         else
-          # calcular precio_total también para error/ok
-          total = (info1[:precio_producto] || 0) + (info1[:precio_envio] || 0)
-          info2 = Map.put(info1, :precio_total, total)
+          # … tu lógica actual:
+          required = [:id_compra, :precio_producto, :precio_envio, :autorizacionPago,
+                      :id_producto, :infraccion, :forma_entrega, :medio_pago]
+          if Enum.any?(required, fn k -> is_nil(Map.get(info1, k)) end) do
+            {:reply, :en_proceso, state}
+          else
+            total = (info1[:precio_producto] || 0) + (info1[:precio_envio] || 0)
+            info2 = Map.put(info1, :precio_total, total)
 
-          status =
-            cond do
-              info2[:infraccion] == true -> :error
-              info2[:autorizacionPago] == false -> :error
-              info2[:infraccion] == :desconocido -> :error
-              info2[:autorizacionPago] == :desconocido -> :error
-              info2[:infraccion] == false and info2[:autorizacionPago] == true -> :ok
-              true -> :en_proceso
-            end
+            status =
+              cond do
+                info2[:infraccion] in [true, :desconocido] -> :error
+                info2[:autorizacionPago] in [false, :desconocido] -> :error
+                info2[:infraccion] == false and info2[:autorizacionPago] == true -> :ok
+                true -> :en_proceso
+              end
 
-          new_state = %{state | compras: Map.put(state.compras, id_compra, {status, info2})}
-
-          reply =
-            case status do
-              :ok         -> {:ok, info2}
-              :error      -> {:error, info2}
+            new_state = %{state | compras: Map.put(state.compras, id_compra, {status, info2})}
+            reply = case status do
+              :ok -> {:ok, info2}
+              :error -> {:error, info2}
               :en_proceso -> :en_proceso
             end
-
-          {:reply, reply, new_state}
+            {:reply, reply, new_state}
+          end
         end
 
       :error ->
         {:reply, {:error, :not_found}, state}
     end
   end
+
 
 
 
@@ -306,13 +333,14 @@ defmodule Libremarket.Compras.Server do
     Queue.declare(chan, @req_infr_q,  durable: false)
     Queue.declare(chan, @req_pago_q, durable: false)
     Queue.declare(chan, @resp_q, durable: false)
+    Queue.declare(chan, @req_env_q,   durable: false)
+    Queue.declare(chan, @req_ventas_q, durable: false)
 
     # Consumir respuestas (no_ack: true porque solo reenviamos al cliente esperando)
     {:ok, _ctag} = Basic.consume(chan, @resp_q, nil, no_ack: true)
 
     # Estado: canal amqp + mapa de esperas por correlation_id + compras
-    {:ok, %{chan: chan, waiting: %{}, compras: %{}, pending_infraccion: %{}, pending_pago: %{}}}
-  end
+    {:ok, %{chan: chan, waiting: %{}, compras: %{}, pending_infraccion: %{}, pending_pago: %{}, pending_reserva: %{}, pending_envio: %{}}}  end
 
 
   @impl true
@@ -328,53 +356,63 @@ defmodule Libremarket.Compras.Server do
     {:noreply, %{s | pending_infraccion: Map.put(pend, id_compra, tref)}}
   end
 
+    @impl true
+    def handle_cast({:rpc_pago_async, id_compra, timeout_ms}, %{chan: chan, pending_pago: pend} = s) do
+      payload = Jason.encode!(%{id_compra: id_compra})
+      Basic.publish(chan, "", @req_pago_q, payload, content_type: "application/json")
+      tref = Process.send_after(self(), {:rpc_pago_timeout, id_compra}, timeout_ms)
+      {:noreply, %{s | pending_pago: Map.put(pend, id_compra, tref)}}
+    end
+
+
   @impl true
-  def handle_cast({:rpc_pago_async, id_compra, timeout_ms}, %{chan: chan, pending_pago: pend} = s) do
-    payload = Jason.encode!(%{id_compra: id_compra})
-    Basic.publish(chan, "", @req_pago_q, payload, content_type: "application/json")
-    tref = Process.send_after(self(), {:rpc_pago_timeout, id_compra}, timeout_ms)
-    {:noreply, %{s | pending_pago: Map.put(pend, id_compra, tref)}}
+  def handle_cast({:rpc_reserva_async, id_compra, id_producto, timeout_ms}, %{chan: chan, pending_reserva: pend} = s) do
+    payload = Jason.encode!(%{type: "reservar", id_compra: id_compra, id_producto: id_producto})
+    Basic.publish(chan, "", @req_ventas_q, payload, content_type: "application/json")
+
+    tref = Process.send_after(self(), {:rpc_reserva_timeout, id_compra}, timeout_ms)
+    {:noreply, %{s | pending_reserva: Map.put(pend, id_compra, tref)}}
   end
 
   @impl true
-  def handle_info({:basic_deliver, payload, %{correlation_id: cid}}, s) when not is_nil(cid) do
-    case Map.pop(s.waiting, cid) do
+  def handle_info({:rpc_reserva_timeout, id_compra}, %{pending_reserva: pend} = s) do
+    case Map.pop(pend, id_compra) do
       {nil, _} ->
-        # No era un RPC síncrono pendiente: tratamos como async por id_compra
-        case Jason.decode(payload) do
-          {:ok, %{"id_compra" => id, "infraccion" => infr}} ->
-            {s2, _} = actualizar_compra_por_infraccion(s, id, infr)
-            {:noreply, s2}
-
-          {:ok, %{"id_compra" => id, "autorizacionPago" => ok?}} ->
-            {s2, _} = actualizar_compra_por_pago(s, id, ok?)
-            {:noreply, s2}
-
-          _ ->
-            {:noreply, s}
-        end
-
-      {{from, tref}, waiting2} ->
-        Process.cancel_timer(tref)
-        reply =
-          case Jason.decode(payload) do
-            {:ok, %{"id_compra" => id, "infraccion" => infr}} ->
-              {:ok, %{id_compra: id, infraccion: infr}}
-
-            {:ok, %{"id_compra" => id, "autorizacionPago" => ok?}} ->
-              {:ok, %{id_compra: id, autorizacionPago: ok?}}
-
-            _ ->
-              {:error, :bad_payload}
-          end
-
-        GenServer.reply(from, reply)
-        {:noreply, %{s | waiting: waiting2}}
+        {:noreply, s} # ya llegó la respuesta
+      {_tref, pend2} ->
+        # si querés, marcá error terminal por timeout:
+        {s2, _} = aplicar_reserva_fail(%{s | pending_reserva: pend2}, id_compra, :timeout_reserva)
+        {:noreply, s2}
     end
   end
 
+  @impl true
+  def handle_cast({:rpc_envio_calcular_async, id, forma, timeout},
+                  %{chan: chan, pending_envio: pend} = s) do
+    payload = Jason.encode!(%{
+      accion: "calcular",
+      id_compra: id,
+      forma_entrega: to_string(forma) # "correo" | "retira"
+    })
 
-  # cuando haya correlation_id podés mantener tu lógica; aquí muestro el camino simple sin cid:
+    Basic.publish(chan, "", @req_env_q, payload, content_type: "application/json")
+    tref = Process.send_after(self(), {:rpc_envio_timeout, id}, timeout)
+    {:noreply, %{s | pending_envio: Map.put(pend, id, tref)}}
+  end
+
+  @impl true
+  def handle_cast({:rpc_envio_agendar_async, id, costo, timeout}, %{chan: chan, pending_envio: pend} = s) do
+    payload = Jason.encode!(%{accion: "agendar", id_compra: id, costo: costo})
+    Basic.publish(chan, "", @req_env_q, payload, content_type: "application/json")
+    tref = Process.send_after(self(), {:rpc_envio_timeout, id}, timeout)
+    {:noreply, %{s | pending_envio: Map.put(pend, id, tref)}}
+  end
+
+
+
+
+
+
   @impl true
   def handle_info({:basic_deliver, payload, _meta}, s) do
     case Jason.decode(payload) do
@@ -387,6 +425,32 @@ defmodule Libremarket.Compras.Server do
       {:ok, %{"id_compra" => id, "autorizacionPago" => ok?}} ->
         {s2, _} = actualizar_compra_por_pago(s, id, ok?)
         {:noreply, s2}
+
+      # éxito de reserva
+      {:ok, %{"type" => "reservar_res", "id_compra" => id, "id_producto" => _idp, "result" => "ok", "precio" => precio}} ->
+        {s2, _} = aplicar_reserva_ok(s, id, precio)
+        {:noreply, s2}
+
+      # errores de reserva
+      {:ok, %{"type" => "reservar_res", "id_compra" => id, "result" => "sin_stock"}} ->
+        {s2, _} = aplicar_reserva_fail(s, id, :sin_stock)
+        {:noreply, s2}
+
+      {:ok, %{"type" => "reservar_res", "id_compra" => id, "result" => "no_existe"}} ->
+        {s2, _} = aplicar_reserva_fail(s, id, :no_existe)
+        {:noreply, s2}
+
+        # ✅ Respuesta de calcular envío
+      {:ok, %{"id_compra" => id, "precio_envio" => costo}} ->
+        {s2, _} = actualizar_compra_por_envio(s, id, costo)
+        {:noreply, s2}
+
+      # ✅ Respuesta de agendar envío (opcional a tu flujo)
+      {:ok, %{"id_compra" => id, "envio_agendado" => true, "id_envio" => id_envio}} ->
+        Logger.info("Envio agendado para compra #{id}: id_envio=#{id_envio}")
+        {:noreply, s}
+
+
 
       _ ->
         {:noreply, s}
@@ -414,6 +478,16 @@ defmodule Libremarket.Compras.Server do
     end
   end
 
+  @impl true
+  def handle_info({:rpc_envio_timeout, id}, %{pending_envio: pend} = s) do
+    case Map.pop(pend, id) do
+      {nil, _} -> {:noreply, s}  # ya llegó
+      {_tref, pend2} ->
+        {s2, _} = actualizar_compra_por_envio(s, id, :desconocido)
+        {:noreply, %{s2 | pending_envio: pend2}}
+    end
+  end
+
 
   defp actualizar_compra_por_infraccion(%{compras: compras} = s, id_compra, infr) do
     case Map.fetch(compras, id_compra) do
@@ -429,8 +503,8 @@ defmodule Libremarket.Compras.Server do
         compra1 = Map.put(compra, :infraccion, infr)
 
         # Reglas de negocio inmediatas (sin cambiar status):
-        if infr in [true, :desconocido] do
-          if compra[:id_producto], do: Libremarket.Ventas.Server.liberarProducto(compra[:id_producto])
+        if infr in [true, :desconocido] and compra[:reservado] == true do
+          _ = publicar_liberar_producto(s, compra[:id_producto])
         end
 
         compras2 = Map.put(compras, id_compra, {status, compra1})
@@ -449,9 +523,33 @@ defmodule Libremarket.Compras.Server do
   end
 
 
+  # defp actualizar_compra_por_pago(%{compras: compras} = s, id_compra, ok?) do
+  #   case Map.fetch(compras, id_compra) do
+  #     :error -> {s, false}
+  #     {:ok, {:ok, _compra}} ->
+  #       # si ya quedó :ok definitivo, ignoramos late replies
+  #       s2 = cancel_pending_pago_timer(s, id_compra)
+  #       {s2, false}
+
+  #     {:ok, {status, compra}} ->
+  #       compra1 = Map.put(compra, :autorizacionPago, ok?)
+
+  #       # si falla o es :desconocido, liberá stock si lo necesitás (ya lo hacés en infracciones)
+  #       if ok? in [false, :desconocido] and compra[:reservado] == true do
+  #         _ = publicar_liberar_producto(s, compra[:id_producto])
+  #       end
+
+  #       compras2 = Map.put(compras, id_compra, {status, compra1})
+  #       s2 = cancel_pending_pago_timer(%{s | compras: compras2}, id_compra)
+  #       {s2, true}
+  #   end
+  # end
+
   defp actualizar_compra_por_pago(%{compras: compras} = s, id_compra, ok?) do
     case Map.fetch(compras, id_compra) do
-      :error -> {s, false}
+      :error ->
+        {s, false}
+
       {:ok, {:ok, _compra}} ->
         # si ya quedó :ok definitivo, ignoramos late replies
         s2 = cancel_pending_pago_timer(s, id_compra)
@@ -461,12 +559,18 @@ defmodule Libremarket.Compras.Server do
         compra1 = Map.put(compra, :autorizacionPago, ok?)
 
         # si falla o es :desconocido, liberá stock si lo necesitás (ya lo hacés en infracciones)
-        if ok? in [false, :desconocido] do
-          if compra[:id_producto], do: Libremarket.Ventas.Server.liberarProducto(compra[:id_producto])
+        if ok? in [false, :desconocido] and compra[:reservado] == true do
+          _ = publicar_liberar_producto(s, compra[:id_producto])
         end
 
         compras2 = Map.put(compras, id_compra, {status, compra1})
         s2 = cancel_pending_pago_timer(%{s | compras: compras2}, id_compra)
+
+        # 🟢 Si el pago fue exitoso, agendamos el envío
+        if ok? == true do
+          _ = publicar_agendar_envio(s2, id_compra, compra[:precio_envio])
+        end
+
         {s2, true}
     end
   end
@@ -481,46 +585,93 @@ defmodule Libremarket.Compras.Server do
   end
 
 
-  # defp actualizar_compra_por_infraccion(%{compras: compras, pending_infraccion: pend} = s, id_compra, infr) do
-  #   case Map.fetch(compras, id_compra) do
-  #     :error ->
-  #       {s, false}
+  defp actualizar_compra_por_envio(%{compras: compras} = s, id, costo) do
+    case Map.fetch(compras, id) do
+      :error -> {s, false}
+      {:ok, {status, compra}} ->
+        compra1 = Map.put(compra, :precio_envio, costo)
+        compras2 = Map.put(compras, id, {status, compra1})
+        s2 = cancel_pending_envio_timer(%{s | compras: compras2}, id)
+        {s2, true}
+    end
+  end
 
-  #     {:ok, {_status, compra}} ->
-  #       compra1 = Map.put(compra, :infraccion, infr)
+  defp cancel_pending_envio_timer(%{pending_envio: pend} = s, id) do
+    case Map.pop(pend, id) do
+      {nil, _} -> s
+      {tref, pend2} ->
+        Process.cancel_timer(tref)
+        %{s | pending_envio: pend2}
+    end
+  end
 
-  #       {compra2, status2} =
-  #         case infr do
-  #           true ->
-  #             if compra[:id_producto], do: Libremarket.Ventas.Server.liberarProducto(compra[:id_producto])
-  #             {compra1, :error}
 
-  #           false ->
-  #             {compra1, :en_proceso}
 
-  #           :desconocido ->
-  #             if compra[:id_producto], do: Libremarket.Ventas.Server.liberarProducto(compra[:id_producto])
-  #             {compra1, :error}
-  #         end
 
-  #       compra3 =
-  #         compra2
-  #         |> Map.put(:precio_total, (compra2[:precio_producto] || 0) + (compra2[:precio_envio] || 0))
 
-  #       compras2 = Map.put(compras, id_compra, {status2, compra3})
 
-  #       # cancelar timeout si existía
-  #       s2 =
-  #         case Map.pop(pend, id_compra) do
-  #           {nil, _} -> s
-  #           {tref, pend2} ->
-  #             Process.cancel_timer(tref)
-  #             %{s | pending_infraccion: pend2}
-  #         end
 
-  #       {%{s2 | compras: compras2}, true}
-  #   end
-  # end
+
+
+  defp aplicar_reserva_ok(%{compras: compras} = s, id_compra, precio) do
+    case Map.fetch(compras, id_compra) do
+      :error -> {s, false}
+      {:ok, {status, compra}} ->
+        compra1 =
+          compra
+          |> Map.put(:precio_producto, precio)
+          |> Map.put(:reservado, true)
+
+        compras2 = Map.put(compras, id_compra, {status, compra1})
+        s2 = cancel_pending_reserva_timer(%{s | compras: compras2}, id_compra)
+        {s2, true}
+    end
+  end
+
+  defp aplicar_reserva_fail(%{compras: compras} = s, id_compra, motivo) do
+    case Map.fetch(compras, id_compra) do
+      :error -> {s, false}
+      {:ok, {_status, compra}} ->
+        compra1 =
+          compra
+          |> Map.put(:reservado, false)
+          |> Map.put(:motivo_reserva, motivo)
+
+        # error terminal por reserva fallida
+        compras2 = Map.put(compras, id_compra, {:error, compra1})
+        s2 = cancel_pending_reserva_timer(%{s | compras: compras2}, id_compra)
+        {s2, true}
+    end
+  end
+
+  defp cancel_pending_reserva_timer(%{pending_reserva: pend} = s, id_compra) do
+    case Map.pop(pend, id_compra) do
+      {nil, _} -> s
+      {tref, pend2} ->
+        Process.cancel_timer(tref)
+        %{s | pending_reserva: pend2}
+    end
+  end
+
+
+
+  defp publicar_liberar_producto(%{chan: chan}, id_producto) when not is_nil(id_producto) do
+    payload = Jason.encode!(%{type: "liberar", id_producto: id_producto})
+    Basic.publish(chan, "", @req_ventas_q, payload, content_type: "application/json")
+    :ok
+  end
+  defp publicar_liberar_producto(_s, _), do: :ok
+
+  defp publicar_agendar_envio(%{chan: chan}, id_compra, costo)
+      when not is_nil(id_compra) and not is_nil(costo) do
+    payload = Jason.encode!(%{accion: "agendar", id_compra: id_compra, costo: costo})
+    Basic.publish(chan, "", @req_env_q, payload, content_type: "application/json")
+    Logger.info("Solicitud de agendado de envío publicada para compra #{id_compra} (costo #{costo})")
+    :ok
+  end
+
+  defp publicar_agendar_envio(_s, _id_compra, _costo), do: :ok
+
 
 
 
