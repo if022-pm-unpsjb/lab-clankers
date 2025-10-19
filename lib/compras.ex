@@ -54,31 +54,13 @@ defmodule Libremarket.Compras do
   def autorizar_pago_state(state, id_compra) do
     case Map.fetch(state.compras, id_compra) do
       {:ok, {status, compra}} ->
-        case Libremarket.Pagos.Server.autorizarPago(id_compra) do
-          true ->
-            compra2   = Map.put(compra, :autorizacionPago, true)
-            new_state = %{state | compras: Map.put(state.compras, id_compra, {status, compra2})}
-            {{:ok, {status, compra2}}, new_state}
+        # limpiamos el campo y disparamos AMQP
+        compra2   = Map.put(compra, :autorizacionPago, nil)
+        new_state = %{state | compras: Map.put(state.compras, id_compra, {status, compra2})}
 
-          false ->
-            compra2 = Map.put(compra, :autorizacionPago, false)
-            if compra[:id_producto], do: Libremarket.Ventas.Server.liberarProducto(compra[:id_producto])
-            new_state = %{state | compras: Map.put(state.compras, id_compra, {status, compra2})}
-            # seguimos devolviendo :ok para que el flujo continúe hasta obtenerCompra/2
-            {{:ok, {status, compra2}}, new_state}
+        _ = Libremarket.Compras.Server.autorizar_pago_amqp(id_compra, 5_000)
 
-          :desconocido ->
-            compra2 = Map.put(compra, :autorizacionPago, :desconocido)
-            if compra[:id_producto], do: Libremarket.Ventas.Server.liberarProducto(compra[:id_producto])
-            new_state = %{state | compras: Map.put(state.compras, id_compra, {status, compra2})}
-            {{:ok, {status, compra2}}, new_state}
-
-          {:error, reason} ->
-            {{:error, reason}, state}
-
-          other ->
-            {{:error, other}, state}
-        end
+        {{:ok, {status, compra2}}, new_state}
 
       :error ->
         {{:error, :not_found}, state}
@@ -164,8 +146,9 @@ defmodule Libremarket.Compras.Server do
 
   @global_name {:global, __MODULE__}
 
-  @req_q  "infracciones.req"
-  @resp_q "compras.resp"
+  @req_infr_q  "infracciones.req"
+  @req_pago_q  "pagos.req"
+  @resp_q      "compras.resp"
 
   # ========== API ==========
   def start_link(opts \\ %{}) do
@@ -211,6 +194,13 @@ defmodule Libremarket.Compras.Server do
   def detectar_infraccion_amqp(pid, id_compra, timeout_ms) do
     GenServer.cast(pid, {:rpc_infraccion_async, id_compra, timeout_ms})
   end
+
+  def autorizar_pago_amqp(id_compra, timeout_ms \\ 5_000),
+    do: GenServer.cast(@global_name, {:rpc_pago_async, id_compra, timeout_ms})
+
+  def autorizar_pago_amqp(pid, id_compra, timeout_ms),
+    do: GenServer.cast(pid, {:rpc_pago_async, id_compra, timeout_ms})
+
 
   # ============== HANDLE CALL ===================
 
@@ -313,14 +303,15 @@ defmodule Libremarket.Compras.Server do
     {:ok, chan} = connect_amqp!()
 
     # Declarar colas (idempotente)
-    Queue.declare(chan, @req_q,  durable: false)
+    Queue.declare(chan, @req_infr_q,  durable: false)
+    Queue.declare(chan, @req_pago_q, durable: false)
     Queue.declare(chan, @resp_q, durable: false)
 
     # Consumir respuestas (no_ack: true porque solo reenviamos al cliente esperando)
     {:ok, _ctag} = Basic.consume(chan, @resp_q, nil, no_ack: true)
 
     # Estado: canal amqp + mapa de esperas por correlation_id + compras
-    {:ok, %{chan: chan, waiting: %{}, compras: %{}, pending_infraccion: %{}}}
+    {:ok, %{chan: chan, waiting: %{}, compras: %{}, pending_infraccion: %{}, pending_pago: %{}}}
   end
 
 
@@ -329,7 +320,7 @@ defmodule Libremarket.Compras.Server do
     payload = Jason.encode!(%{id_compra: id_compra})
 
     Basic.publish(
-      chan, "", @req_q, payload,
+      chan, "", @req_infr_q, payload,
       content_type: "application/json"
     )
 
@@ -337,15 +328,26 @@ defmodule Libremarket.Compras.Server do
     {:noreply, %{s | pending_infraccion: Map.put(pend, id_compra, tref)}}
   end
 
+  @impl true
+  def handle_cast({:rpc_pago_async, id_compra, timeout_ms}, %{chan: chan, pending_pago: pend} = s) do
+    payload = Jason.encode!(%{id_compra: id_compra})
+    Basic.publish(chan, "", @req_pago_q, payload, content_type: "application/json")
+    tref = Process.send_after(self(), {:rpc_pago_timeout, id_compra}, timeout_ms)
+    {:noreply, %{s | pending_pago: Map.put(pend, id_compra, tref)}}
+  end
 
   @impl true
   def handle_info({:basic_deliver, payload, %{correlation_id: cid}}, s) when not is_nil(cid) do
     case Map.pop(s.waiting, cid) do
       {nil, _} ->
-        # No era un RPC síncrono pendiente: procesamos como asíncrono por id_compra
+        # No era un RPC síncrono pendiente: tratamos como async por id_compra
         case Jason.decode(payload) do
           {:ok, %{"id_compra" => id, "infraccion" => infr}} ->
             {s2, _} = actualizar_compra_por_infraccion(s, id, infr)
+            {:noreply, s2}
+
+          {:ok, %{"id_compra" => id, "autorizacionPago" => ok?}} ->
+            {s2, _} = actualizar_compra_por_pago(s, id, ok?)
             {:noreply, s2}
 
           _ ->
@@ -356,8 +358,14 @@ defmodule Libremarket.Compras.Server do
         Process.cancel_timer(tref)
         reply =
           case Jason.decode(payload) do
-            {:ok, %{"id_compra" => id, "infraccion" => infr}} -> {:ok, %{id_compra: id, infraccion: infr}}
-            _ -> {:error, :bad_payload}
+            {:ok, %{"id_compra" => id, "infraccion" => infr}} ->
+              {:ok, %{id_compra: id, infraccion: infr}}
+
+            {:ok, %{"id_compra" => id, "autorizacionPago" => ok?}} ->
+              {:ok, %{id_compra: id, autorizacionPago: ok?}}
+
+            _ ->
+              {:error, :bad_payload}
           end
 
         GenServer.reply(from, reply)
@@ -365,12 +373,19 @@ defmodule Libremarket.Compras.Server do
     end
   end
 
+
+  # cuando haya correlation_id podés mantener tu lógica; aquí muestro el camino simple sin cid:
   @impl true
   def handle_info({:basic_deliver, payload, _meta}, s) do
-    # Camino asíncrono (sin correlation_id): enrutamos por id_compra del payload
     case Jason.decode(payload) do
+      # respuesta de infracciones (como ya tenías)
       {:ok, %{"id_compra" => id, "infraccion" => infr}} ->
         {s2, _} = actualizar_compra_por_infraccion(s, id, infr)
+        {:noreply, s2}
+
+      # NUEVO: respuesta de pagos
+      {:ok, %{"id_compra" => id, "autorizacionPago" => ok?}} ->
+        {s2, _} = actualizar_compra_por_pago(s, id, ok?)
         {:noreply, s2}
 
       _ ->
@@ -386,6 +401,16 @@ defmodule Libremarket.Compras.Server do
       {_tref, pend2} ->
         {s2, _} = actualizar_compra_por_infraccion(s, id_compra, :desconocido)
         {:noreply, %{s2 | pending_infraccion: pend2}}
+    end
+  end
+
+  @impl true
+  def handle_info({:rpc_pago_timeout, id_compra}, %{pending_pago: pend} = s) do
+    case Map.pop(pend, id_compra) do
+      {nil, _} -> {:noreply, s}  # ya llegó
+      {_tref, pend2} ->
+        {s2, _} = actualizar_compra_por_pago(s, id_compra, :desconocido)
+        {:noreply, %{s2 | pending_pago: pend2}}
     end
   end
 
@@ -423,6 +448,37 @@ defmodule Libremarket.Compras.Server do
     end
   end
 
+
+  defp actualizar_compra_por_pago(%{compras: compras} = s, id_compra, ok?) do
+    case Map.fetch(compras, id_compra) do
+      :error -> {s, false}
+      {:ok, {:ok, _compra}} ->
+        # si ya quedó :ok definitivo, ignoramos late replies
+        s2 = cancel_pending_pago_timer(s, id_compra)
+        {s2, false}
+
+      {:ok, {status, compra}} ->
+        compra1 = Map.put(compra, :autorizacionPago, ok?)
+
+        # si falla o es :desconocido, liberá stock si lo necesitás (ya lo hacés en infracciones)
+        if ok? in [false, :desconocido] do
+          if compra[:id_producto], do: Libremarket.Ventas.Server.liberarProducto(compra[:id_producto])
+        end
+
+        compras2 = Map.put(compras, id_compra, {status, compra1})
+        s2 = cancel_pending_pago_timer(%{s | compras: compras2}, id_compra)
+        {s2, true}
+    end
+  end
+
+  defp cancel_pending_pago_timer(%{pending_pago: pend} = s, id_compra) do
+    case Map.pop(pend, id_compra) do
+      {nil, _} -> s
+      {tref, pend2} ->
+        Process.cancel_timer(tref)
+        %{s | pending_pago: pend2}
+    end
+  end
 
 
   # defp actualizar_compra_por_infraccion(%{compras: compras, pending_infraccion: pend} = s, id_compra, infr) do
