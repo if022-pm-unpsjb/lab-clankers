@@ -8,6 +8,8 @@ defmodule Libremarket.Infracciones do
     infraccion?
   end
 end
+
+
 defmodule Libremarket.Infracciones.Server do
   @moduledoc "Infracciones"
   use GenServer
