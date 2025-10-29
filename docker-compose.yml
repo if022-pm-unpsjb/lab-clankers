@@ -1,8 +1,8 @@
 services:
 
-  infracciones:
+  infracciones-primario:
     image: elixir:1.15.7-otp-26-alpine
-    container_name: infracciones
+    container_name: infracciones-primario
     volumes:
       - ./:/app
     working_dir: /app
@@ -13,11 +13,59 @@ services:
       SERVER_TO_RUN: Elixir.Libremarket.Infracciones.Server
       AMQP_URL: amqps://oiawxlbc:v4Z6nPfJiy01FZw3QmObwAPPz90bs8t-@jackal.rmq.cloudamqp.com/oiawxlbc
       INSECURE_AMQPS: "1"
+      ES_PRIMARIO: "1"
+      NOMBRE: "infracciones-primario"
     command: 
-      elixir --sname infracciones --cookie ${SECRET} -S mix run --no-halt --no-compile 
+      elixir --sname infracciones-primario --cookie ${SECRET} -S mix run --no-halt --no-compile 
     stdin_open: true
     tty: true
     user: "${DOCKER_UID}:${DOCKER_GID}"
+
+
+  infracciones-replica-1:
+    image: elixir:1.15.7-otp-26-alpine
+    container_name: infracciones-replica-1
+    volumes:
+      - ./:/app
+    working_dir: /app
+    network_mode: "host"
+    environment:
+      MIX_HOME: /app/mix_home
+      HEX_HOME: /app/hex_home
+      SERVER_TO_RUN: Elixir.Libremarket.Infracciones.Server
+      AMQP_URL: amqps://oiawxlbc:v4Z6nPfJiy01FZw3QmObwAPPz90bs8t-@jackal.rmq.cloudamqp.com/oiawxlbc
+      INSECURE_AMQPS: "1"
+      ES_PRIMARIO: "0"
+      NOMBRE: "infracciones-replica-1"
+    command: 
+      elixir --sname infracciones-replica-1 --cookie ${SECRET} -S mix run --no-halt --no-compile 
+    stdin_open: true
+    tty: true
+    user: "${DOCKER_UID}:${DOCKER_GID}"
+
+  
+  infracciones-replica-2:
+    image: elixir:1.15.7-otp-26-alpine
+    container_name: infracciones-replica-2
+    volumes:
+      - ./:/app
+    working_dir: /app
+    network_mode: "host"
+    environment:
+      MIX_HOME: /app/mix_home
+      HEX_HOME: /app/hex_home
+      SERVER_TO_RUN: Elixir.Libremarket.Infracciones.Server
+      AMQP_URL: amqps://oiawxlbc:v4Z6nPfJiy01FZw3QmObwAPPz90bs8t-@jackal.rmq.cloudamqp.com/oiawxlbc
+      INSECURE_AMQPS: "1"
+      ES_PRIMARIO: "0"
+      NOMBRE: "infracciones-replica-2"
+    command: 
+      elixir --sname infracciones-replica-2 --cookie ${SECRET} -S mix run --no-halt --no-compile 
+    stdin_open: true
+    tty: true
+    user: "${DOCKER_UID}:${DOCKER_GID}"
+
+
 
   compras:
     image: elixir:1.15.7-otp-26-alpine
@@ -31,7 +79,6 @@ services:
       HEX_HOME: /app/hex_home
       SERVER_TO_RUN: Elixir.Libremarket.Compras.Server
       AMQP_URL: amqps://oiawxlbc:v4Z6nPfJiy01FZw3QmObwAPPz90bs8t-@jackal.rmq.cloudamqp.com/oiawxlbc
-    # 👇 instalamos certificados antes de arrancar iex
     command: 
       elixir --sname compras --cookie ${SECRET} -S mix run --no-halt --no-compile 
     tty: true

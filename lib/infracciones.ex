@@ -16,7 +16,7 @@ defmodule Libremarket.Infracciones.Server do
   require Logger
   alias AMQP.{Connection, Channel, Queue, Basic}
 
-  @global_name {:global, __MODULE__}
+  @global_name {:global, System.get_env("NOMBRE") || __MODULE__}
   @req_q  "infracciones.req"
   @resp_q "compras.resp"
 
@@ -29,11 +29,6 @@ defmodule Libremarket.Infracciones.Server do
     GenServer.start_link(__MODULE__, opts, name: @global_name)
   end
 
-  def detectarInfraccion(pid \\ @global_name, id_compra) do
-    Logger.info("[Infracciones.Server] detectarInfraccion/2 → call id_compra=#{inspect(id_compra)}")
-    GenServer.call(pid, {:detectarInfraccion, id_compra})
-  end
-
   def listarInfracciones(pid \\ @global_name) do
     Logger.info("[Infracciones.Server] listarInfracciones/1 → call")
     GenServer.call(pid, :listarInfracciones)
@@ -43,11 +38,26 @@ defmodule Libremarket.Infracciones.Server do
   @impl true
   def init(_opts) do
     Process.flag(:trap_exit, true)
-    Logger.info("[Infracciones.Server] init/1 → preparando conexión AMQP diferida")
-    state = %{conn: nil, chan: nil, backoff: @min_backoff}
-    send(self(), :connect)
-    {:ok, state}
+
+    base_state = %{infracciones: %{}}
+
+    if System.get_env("ES_PRIMARIO") in ["1", "true", "TRUE"] do
+      Logger.info("[Infracciones.Server] init/1 → preparando conexión AMQP diferida")
+      state_primario = Map.merge(base_state, %{conn: nil, chan: nil, backoff: @min_backoff})
+      send(self(), :connect)
+      {:ok, state_primario}
+    else
+      {:ok, base_state}
+    end
   end
+
+
+  @impl true
+  def handle_call(:listarInfracciones, _from, state) do
+    Logger.info("[Infracciones.Server] handle_call(:listarInfracciones) → reply name=#{inspect(@global_name)} node=#{inspect(node())}")
+    {:reply, state.infracciones, state}
+  end
+
 
   @impl true
   def handle_info(:connect, %{backoff: backoff} = state) do
@@ -81,7 +91,7 @@ defmodule Libremarket.Infracciones.Server do
     {:noreply, %{state | conn: nil, chan: nil, backoff: @min_backoff}}
   end
 
-  # Mensaje de negocio
+
   @impl true
   def handle_info({:basic_deliver, payload, meta}, %{chan: chan} = state)
       when is_binary(payload) and is_map(meta) and not is_nil(chan) do
@@ -91,7 +101,16 @@ defmodule Libremarket.Infracciones.Server do
     case Jason.decode(payload) do
       {:ok, %{"id_compra" => id_compra}} ->
         Logger.info("[Infracciones.Server] Procesando id_compra=#{id_compra}")
+
         infr = Libremarket.Infracciones.detectar_infraccion(id_compra)
+
+        # Guarda/actualiza el mapa: id_compra => true/false
+        new_state =
+          update_in(state, [:infracciones], fn m ->
+            m = m || %{}
+            Map.put(m, id_compra, infr)
+          end)
+
         resp = Jason.encode!(%{id_compra: id_compra, infraccion: infr})
         Logger.info("[Infracciones.Server] Publicando respuesta en '#{@resp_q}' cid=#{inspect(cid)} infraccion=#{inspect(infr)}")
 
@@ -101,12 +120,18 @@ defmodule Libremarket.Infracciones.Server do
           content_type: "application/json"
         )
 
-      other ->
-        Logger.warning("[Infracciones.Server] Payload inválido en '#{@req_q}': #{inspect(other)}")
-    end
+        {:noreply, new_state}
 
-    {:noreply, state}
+      {:ok, other} ->
+        Logger.warning("[Infracciones.Server] Payload con forma inesperada en '#{@req_q}': #{inspect(other)}")
+        {:noreply, state}
+
+      {:error, reason} ->
+        Logger.warning("[Infracciones.Server] JSON inválido en '#{@req_q}': #{inspect(reason)}")
+        {:noreply, state}
+    end
   end
+
 
   # Si aún no hay canal, descartamos
   def handle_info({:basic_deliver, _p, meta}, state) do
