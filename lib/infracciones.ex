@@ -1,13 +1,60 @@
 defmodule Libremarket.Infracciones do
-  @moduledoc "Lógica de infracciones"
+  require Logger
 
-  @doc "Retorna true ~30% de las veces; usa el id_compra solo para trazas si querés."
-  def detectar_infraccion(_id_compra) do
+  @doc """
+  Genera una infracción aleatoria (~30%) y replica el resultado
+  a los nodos de infracciones (réplicas) mediante RPC.
+
+  Retorna el resultado (true/false).
+  """
+  def detectar_infraccion(id_compra) do
     infraccion? = :rand.uniform(100) <= 30
-    IO.puts("Hay infracción: #{infraccion?}")
+    Logger.info("[Infracciones] id_compra=#{id_compra} → infraccion?=#{infraccion?}")
+
+    # Enviamos el resultado a las réplicas
+    # replicate_to_replicas(id_compra, infraccion?)
+
     infraccion?
   end
+
+  # --- Helpers internos ---
+
+  # # Filtra nodos remotos que contienen "infracciones-" en el nombre
+  # defp replica_nodes do
+  #   Node.list()
+  #   |> Enum.filter(fn n ->
+  #     name = Atom.to_string(n)
+  #     String.contains?(name, "infracciones-") and not String.contains?(name, "primario")
+  #   end)
+  # end
+
+  # # Envia el resultado a cada réplica
+  # defp replicate_to_replicas(id_compra, infraccion?) do
+  #   replicas = replica_nodes()
+
+  #   if replicas == [] do
+  #     Logger.warning("[Infracciones] ⚠️ No hay réplicas conectadas para sincronizar")
+  #   else
+  #     Enum.each(replicas, fn nodo ->
+  #       Logger.info("[Infracciones] RPC → #{nodo} id_compra=#{id_compra} infraccion=#{infraccion?}")
+  #       try do
+  #         :rpc.cast(nodo, Libremarket.Infracciones.Server, :replicar_resultado, [id_compra, infraccion?])
+  #       catch
+  #         kind, reason ->
+  #           Logger.error("[Infracciones] Error replicando en #{nodo}: #{inspect({kind, reason})}")
+  #       end
+  #     end)
+  #   end
+  # end
+
+  defp replicate_to_replicas(id_compra, infraccion?) do
+    Logger.info("[Infracciones] id_compra=#{id_compra} infraccion=#{infraccion?}")
+    GenServer.call({:global, :"infracciones-replica-1"}, {:replicar_resultado, id_compra, infraccion?})
+    GenServer.call({:global, :"infracciones-replica-2"}, {:replicar_resultado, id_compra, infraccion?})
+  end
+
 end
+
 
 
 defmodule Libremarket.Infracciones.Server do
@@ -16,7 +63,9 @@ defmodule Libremarket.Infracciones.Server do
   require Logger
   alias AMQP.{Connection, Channel, Queue, Basic}
 
-  @global_name {:global, System.get_env("NOMBRE") || __MODULE__}
+  @global_name nil
+
+  #@global_name {:global, (System.get_env("NOMBRE") |> to_string() |> String.trim())}
   @req_q  "infracciones.req"
   @resp_q "compras.resp"
 
@@ -25,13 +74,22 @@ defmodule Libremarket.Infracciones.Server do
 
   # ===== API cliente =====
   def start_link(opts \\ %{}) do
-    Logger.info("[Infracciones.Server] start_link/1 con opts=#{inspect(opts)}")
-    GenServer.start_link(__MODULE__, opts, name: @global_name)
+    nombre = System.get_env("NOMBRE") |> to_string() |> String.trim() |> String.to_atom()
+
+    global_name = {:global, nombre}
+
+    # Guardamos el valor en :persistent_term (global en el VM)
+    :persistent_term.put({__MODULE__, :global_name}, global_name)
+
+    Logger.info("[Infracciones.Server] Registrando global_name=#{inspect(global_name)} nodo=#{inspect(node())}")
+    GenServer.start_link(__MODULE__, opts, name: global_name)
   end
+
+  def global_name(), do: :persistent_term.get({__MODULE__, :global_name})
 
   def listarInfracciones(pid \\ @global_name) do
     Logger.info("[Infracciones.Server] listarInfracciones/1 → call")
-    GenServer.call(pid, :listarInfracciones)
+    GenServer.call(global_name(), :listarInfracciones)
   end
 
   # ===== Callbacks =====
@@ -56,6 +114,15 @@ defmodule Libremarket.Infracciones.Server do
   def handle_call(:listarInfracciones, _from, state) do
     Logger.info("[Infracciones.Server] handle_call(:listarInfracciones) → reply name=#{inspect(@global_name)} node=#{inspect(node())}")
     {:reply, state.infracciones, state}
+  end
+
+  @impl true
+  def handle_call({:replicar_resultado, id_compra, infraccion?}, _from, state) do
+    Logger.info("[Infracciones.Server] 🔁 Resultado replicado recibido id_compra=#{id_compra} infraccion=#{infraccion?}")
+    nuevo = Map.update(state, :infracciones, %{id_compra => infraccion?}, fn map ->
+      Map.put(map, id_compra, infraccion?)
+    end)
+    {:reply, :ok, nuevo}
   end
 
 
@@ -102,17 +169,20 @@ defmodule Libremarket.Infracciones.Server do
       {:ok, %{"id_compra" => id_compra}} ->
         Logger.info("[Infracciones.Server] Procesando id_compra=#{id_compra}")
 
-        infr = Libremarket.Infracciones.detectar_infraccion(id_compra)
+        infraccion = Libremarket.Infracciones.detectar_infraccion(id_compra)
+        Logger.info("[Infracciones] id_compra=#{id_compra} infraccion=#{infraccion}")
+        GenServer.call({:global, :"infracciones-replica-1"}, {:replicar_resultado, id_compra, infraccion})
+        GenServer.call({:global, :"infracciones-replica-2"}, {:replicar_resultado, id_compra, infraccion})
 
         # Guarda/actualiza el mapa: id_compra => true/false
         new_state =
           update_in(state, [:infracciones], fn m ->
             m = m || %{}
-            Map.put(m, id_compra, infr)
+            Map.put(m, id_compra, infraccion)
           end)
 
-        resp = Jason.encode!(%{id_compra: id_compra, infraccion: infr})
-        Logger.info("[Infracciones.Server] Publicando respuesta en '#{@resp_q}' cid=#{inspect(cid)} infraccion=#{inspect(infr)}")
+        resp = Jason.encode!(%{id_compra: id_compra, infraccion: infraccion})
+        Logger.info("[Infracciones.Server] Publicando respuesta en '#{@resp_q}' cid=#{inspect(cid)} infraccion=#{inspect(infraccion)}")
 
         Basic.publish(
           chan, "", @resp_q, resp,

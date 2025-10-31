@@ -14,7 +14,7 @@ services:
       AMQP_URL: amqps://oiawxlbc:v4Z6nPfJiy01FZw3QmObwAPPz90bs8t-@jackal.rmq.cloudamqp.com/oiawxlbc
       INSECURE_AMQPS: "1"
       ES_PRIMARIO: "1"
-      NOMBRE: "infracciones-primario"
+      NOMBRE: infracciones-primario
     command: 
       elixir --sname infracciones-primario --cookie ${SECRET} -S mix run --no-halt --no-compile 
     stdin_open: true
@@ -36,7 +36,7 @@ services:
       AMQP_URL: amqps://oiawxlbc:v4Z6nPfJiy01FZw3QmObwAPPz90bs8t-@jackal.rmq.cloudamqp.com/oiawxlbc
       INSECURE_AMQPS: "1"
       ES_PRIMARIO: "0"
-      NOMBRE: "infracciones-replica-1"
+      NOMBRE: infracciones-replica-1
     command: 
       elixir --sname infracciones-replica-1 --cookie ${SECRET} -S mix run --no-halt --no-compile 
     stdin_open: true
@@ -58,7 +58,7 @@ services:
       AMQP_URL: amqps://oiawxlbc:v4Z6nPfJiy01FZw3QmObwAPPz90bs8t-@jackal.rmq.cloudamqp.com/oiawxlbc
       INSECURE_AMQPS: "1"
       ES_PRIMARIO: "0"
-      NOMBRE: "infracciones-replica-2"
+      NOMBRE: infracciones-replica-2
     command: 
       elixir --sname infracciones-replica-2 --cookie ${SECRET} -S mix run --no-halt --no-compile 
     stdin_open: true
