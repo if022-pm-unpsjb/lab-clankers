@@ -12,45 +12,38 @@ defmodule Libremarket.Infracciones do
     Logger.info("[Infracciones] id_compra=#{id_compra} → infraccion?=#{infraccion?}")
 
     # Enviamos el resultado a las réplicas
-    # replicate_to_replicas(id_compra, infraccion?)
+    replicate_to_replicas(id_compra, infraccion?)
 
     infraccion?
   end
 
   # --- Helpers internos ---
+ defp replica_names do
+    :global.registered_names()
+    |> Enum.filter(fn name ->
+      name_str = Atom.to_string(name)
+      String.starts_with?(name_str, "infracciones-replica-")
+    end)
+  end
 
-  # # Filtra nodos remotos que contienen "infracciones-" en el nombre
-  # defp replica_nodes do
-  #   Node.list()
-  #   |> Enum.filter(fn n ->
-  #     name = Atom.to_string(n)
-  #     String.contains?(name, "infracciones-") and not String.contains?(name, "primario")
-  #   end)
-  # end
-
-  # # Envia el resultado a cada réplica
-  # defp replicate_to_replicas(id_compra, infraccion?) do
-  #   replicas = replica_nodes()
-
-  #   if replicas == [] do
-  #     Logger.warning("[Infracciones] ⚠️ No hay réplicas conectadas para sincronizar")
-  #   else
-  #     Enum.each(replicas, fn nodo ->
-  #       Logger.info("[Infracciones] RPC → #{nodo} id_compra=#{id_compra} infraccion=#{infraccion?}")
-  #       try do
-  #         :rpc.cast(nodo, Libremarket.Infracciones.Server, :replicar_resultado, [id_compra, infraccion?])
-  #       catch
-  #         kind, reason ->
-  #           Logger.error("[Infracciones] Error replicando en #{nodo}: #{inspect({kind, reason})}")
-  #       end
-  #     end)
-  #   end
-  # end
-
+  # Envia el resultado a cada réplica mediante GenServer.call
   defp replicate_to_replicas(id_compra, infraccion?) do
-    Logger.info("[Infracciones] id_compra=#{id_compra} infraccion=#{infraccion?}")
-    GenServer.call({:global, :"infracciones-replica-1"}, {:replicar_resultado, id_compra, infraccion?})
-    GenServer.call({:global, :"infracciones-replica-2"}, {:replicar_resultado, id_compra, infraccion?})
+    replicas = replica_names()
+
+    if replicas == [] do
+      Logger.warning("[Infracciones] ⚠️ No hay réplicas registradas globalmente para sincronizar")
+    else
+      Enum.each(replicas, fn replica_name ->
+        Logger.info("[Infracciones] GenServer.call → #{replica_name} id_compra=#{id_compra} infraccion=#{infraccion?}")
+
+        try do
+          GenServer.call({:global, replica_name}, {:replicar_resultado, id_compra, infraccion?})
+        catch
+          kind, reason ->
+            Logger.error("[Infracciones] Error replicando en #{replica_name}: #{inspect({kind, reason})}")
+        end
+      end)
+    end
   end
 
 end
@@ -170,9 +163,6 @@ defmodule Libremarket.Infracciones.Server do
         Logger.info("[Infracciones.Server] Procesando id_compra=#{id_compra}")
 
         infraccion = Libremarket.Infracciones.detectar_infraccion(id_compra)
-        Logger.info("[Infracciones] id_compra=#{id_compra} infraccion=#{infraccion}")
-        GenServer.call({:global, :"infracciones-replica-1"}, {:replicar_resultado, id_compra, infraccion})
-        GenServer.call({:global, :"infracciones-replica-2"}, {:replicar_resultado, id_compra, infraccion})
 
         # Guarda/actualiza el mapa: id_compra => true/false
         new_state =

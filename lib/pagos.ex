@@ -1,10 +1,43 @@
 defmodule Libremarket.Pagos do
-  def autorizarPago(_id_compra) do
+  require Logger
+
+  def autorizarPago(id_compra) do
     # ~70% autoriza
-    pago_autorizado = :rand.uniform(100) < 70
-    IO.puts("Pago autorizado: #{pago_autorizado}")
-    pago_autorizado
+    pago_autorizado? = :rand.uniform(100) < 70
+    IO.puts("Pago autorizado: #{pago_autorizado?}")
+    replicate_to_replicas(id_compra, pago_autorizado?)
+    pago_autorizado?
   end
+
+  # --- Helpers internos ---
+ defp replica_names do
+    :global.registered_names()
+    |> Enum.filter(fn name ->
+      name_str = Atom.to_string(name)
+      String.starts_with?(name_str, "pagos-replica-")
+    end)
+  end
+
+  # Envia el resultado a cada réplica mediante GenServer.call
+  defp replicate_to_replicas(id_compra, pago_autorizado?) do
+    replicas = replica_names()
+
+    if replicas == [] do
+      Logger.warning("[Pagos] ⚠️ No hay réplicas registradas globalmente para sincronizar")
+    else
+      Enum.each(replicas, fn replica_name ->
+        Logger.info("[Pagos] GenServer.call → #{replica_name} id_compra=#{id_compra} pago_autorizado=#{pago_autorizado?}")
+
+        try do
+          GenServer.call({:global, replica_name}, {:replicar_resultado, id_compra, pago_autorizado?})
+        catch
+          kind, reason ->
+            Logger.error("[Pagos] Error replicando en #{replica_name}: #{inspect({kind, reason})}")
+        end
+      end)
+    end
+  end
+
 end
 
 defmodule Libremarket.Pagos.Server do
@@ -13,7 +46,7 @@ defmodule Libremarket.Pagos.Server do
   require Logger
   alias AMQP.{Connection, Channel, Queue, Basic}
 
-  @global_name {:global, __MODULE__}
+  @global_name nil
   @req_q  "pagos.req"
   @resp_q "compras.resp"
 
@@ -22,23 +55,49 @@ defmodule Libremarket.Pagos.Server do
 
   # ========= API =========
   def start_link(opts \\ %{}) do
-    GenServer.start_link(__MODULE__, opts, name: @global_name)
+
+    nombre = System.get_env("NOMBRE") |> to_string() |> String.trim() |> String.to_atom()
+
+    global_name = {:global, nombre}
+
+    # Guardamos el valor en :persistent_term (global en el VM)
+    :persistent_term.put({__MODULE__, :global_name}, global_name)
+
+    Logger.info("[Pagos.Server] Registrando global_name=#{inspect(global_name)} nodo=#{inspect(node())}")
+    GenServer.start_link(__MODULE__, opts, name: global_name)
   end
 
-  # Opcionales para pruebas manuales
-  def autorizarPago(pid \\ @global_name, id_compra),
-    do: GenServer.call(pid, {:autorizarPago, id_compra})
+  def global_name(), do: :persistent_term.get({__MODULE__, :global_name})
 
+
+  # Opcionales para pruebas manuales
   def publicarResultado(pid \\ @global_name, id_compra, opts \\ []),
-    do: GenServer.call(pid, {:publicarResultado, id_compra, opts})
+    do: GenServer.call(global_name(), {:publicarResultado, id_compra, opts})
+
+  def listarAutorizaciones(pid \\ @global_name) do
+    Logger.info("[pagos.Server] listarAutorizaciones/1 → call")
+    GenServer.call(global_name(), :listarAutorizaciones)
+  end
+
+
+
 
   # ========= Callbacks =========
+
   @impl true
   def init(_opts) do
     Process.flag(:trap_exit, true)
-    state = %{conn: nil, chan: nil, backoff: @min_backoff, resultados: %{}}
-    send(self(), :connect)
-    {:ok, state}
+
+    base_state = %{autorizacion_pagos: %{}}
+
+    if System.get_env("ES_PRIMARIO") in ["1", "true", "TRUE"] do
+      Logger.info("[Pagos.Server] init/1 → preparando conexión AMQP diferida")
+      state_primario = Map.merge(base_state, %{conn: nil, chan: nil, backoff: @min_backoff})
+      send(self(), :connect)
+      {:ok, state_primario}
+    else
+      {:ok, base_state}
+    end
   end
 
   @impl true
@@ -100,11 +159,7 @@ defmodule Libremarket.Pagos.Server do
 
 
   # ---- handle_call para pruebas manuales / utilitarios
-  @impl true
-  def handle_call({:autorizarPago, id}, _from, s) do
-    {ok?, s2} = detect_and_store(s, id)
-    {:reply, ok?, s2}
-  end
+
 
   @impl true
   def handle_call({:publicarResultado, id, opts}, _from, %{chan: nil} = s),
@@ -119,13 +174,28 @@ defmodule Libremarket.Pagos.Server do
     {:reply, {:ok, %{id_compra: id, autorizacionPago: ok?}}, s2}
   end
 
+  @impl true
+  def handle_call(:listarAutorizaciones, _from, state) do
+    Logger.info("[Pagos.Server] handle_call(:listarAutorizaciones) → reply name=#{inspect(@global_name)} node=#{inspect(node())}")
+    {:reply, state.autorizacion_pagos, state}
+  end
+
+  @impl true
+  def handle_call({:replicar_resultado, id_compra, autorizacion?}, _from, state) do
+    Logger.info("[Pagos.Server] 🔁 Resultado replicado recibido id_compra=#{id_compra} autorizacion=#{autorizacion?}")
+    nuevo = Map.update(state, :autorizacion_pagos, %{id_compra => autorizacion?}, fn map ->
+      Map.put(map, id_compra, autorizacion?)
+    end)
+    {:reply, :ok, nuevo}
+  end
+
   # ---- helpers
   defp detect_and_store(s, id) do
-    case Map.fetch(s.resultados, id) do
+    case Map.fetch(s.autorizacion_pagos, id) do
       {:ok, v} -> {v, s}
       :error ->
         v = Libremarket.Pagos.autorizarPago(id)
-        {v, %{s | resultados: Map.put(s.resultados, id, v)}}
+        {v, %{s | autorizacion_pagos: Map.put(s.autorizacion_pagos, id, v)}}
     end
   end
 

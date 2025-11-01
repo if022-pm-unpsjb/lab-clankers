@@ -311,7 +311,7 @@ defmodule Libremarket.Compras.Server do
     {:ok, _ctag} = Basic.consume(chan, @resp_q, nil, no_ack: true)
 
     # Estado: canal amqp + mapa de esperas por correlation_id + compras
-    {:ok, %{chan: chan, waiting: %{}, compras: %{}, pending_infraccion: %{}, pending_pago: %{}, pending_reserva: %{}, pending_envio: %{}}}  
+    {:ok, %{chan: chan, waiting: %{}, compras: %{}, pending_infraccion: %{}, pending_pago: %{}, pending_reserva: %{}, pending_envio: %{}}}
   end
 
 
@@ -464,28 +464,38 @@ defmodule Libremarket.Compras.Server do
 
 
   defp actualizar_compra_por_infraccion(%{compras: compras} = s, id_compra, infr) do
+    Logger.info("[ACTUALIZAR COMPRA POR INFRACCION] Procesando infracción para id_compra=#{inspect(id_compra)}, infracción=#{inspect(infr)}")
+
     case Map.fetch(compras, id_compra) do
       :error ->
+        Logger.warn("[ACTUALIZAR COMPRA POR INFRACCION] No se encontró la compra con id_compra=#{inspect(id_compra)}")
         {s, false}
 
       # Si ya quedó :ok (decidido por obtenerCompra/2), ignoramos una infracción tardía
       {:ok, {:ok, _compra}} ->
+        Logger.info("[ACTUALIZAR COMPRA POR INFRACCION] La compra con id_compra=#{inspect(id_compra)} ya está en estado :ok, ignorando infracción.")
         s2 = cancel_pending_infraccion_timer(s, id_compra)
         {s2, false}
 
       {:ok, {status, compra}} ->
+        Logger.info("[ACTUALIZAR COMPRA POR INFRACCION] Compra con id_compra=#{inspect(id_compra)} encontrada. Status=#{inspect(status)}, Compra=#{inspect(compra)}")
+
         compra1 = Map.put(compra, :infraccion, infr)
 
         # Reglas de negocio inmediatas (sin cambiar status):
         if infr in [true, :desconocido] and compra[:reservado] == true do
+          Logger.info("[ACTUALIZAR COMPRA POR INFRACCION] La compra con id_compra=#{inspect(id_compra)} está reservada, se procederá a liberar el producto.")
           _ = publicar_liberar_producto(s, compra[:id_producto])
         end
 
         compras2 = Map.put(compras, id_compra, {status, compra1})
+        Logger.info("[ACTUALIZAR COMPRA POR INFRACCION] Compra con id_compra=#{inspect(id_compra)} actualizada, infracción #{inspect(infr)} aplicada.")
+
         s2 = cancel_pending_infraccion_timer(%{s | compras: compras2}, id_compra)
         {s2, true}
     end
   end
+
 
   defp cancel_pending_infraccion_timer(%{pending_infraccion: pend} = s, id_compra) do
     case Map.pop(pend, id_compra) do

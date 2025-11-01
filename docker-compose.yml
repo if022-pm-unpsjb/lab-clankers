@@ -103,9 +103,9 @@ services:
     tty: true
     user: "${DOCKER_UID}:${DOCKER_GID}"
 
-  ventas:
+  ventas-primario:
     image: elixir:1.15.7-otp-26-alpine
-    container_name: ventas
+    container_name: ventas-primario
     volumes:
       - ./:/app
     working_dir: /app
@@ -116,15 +116,59 @@ services:
       SERVER_TO_RUN: Elixir.Libremarket.Ventas.Server
       AMQP_URL: amqps://oiawxlbc:v4Z6nPfJiy01FZw3QmObwAPPz90bs8t-@jackal.rmq.cloudamqp.com/oiawxlbc
       INSECURE_AMQPS: "1"
+      ES_PRIMARIO: "1"
+      NOMBRE: ventas-primario      
     command: 
-      elixir --sname ventas --cookie ${SECRET} -S mix run --no-halt --no-compile 
+      elixir --sname ventas-primario --cookie ${SECRET} -S mix run --no-halt --no-compile 
     stdin_open: true
     tty: true
     user: "${DOCKER_UID}:${DOCKER_GID}"
 
-  pagos:
+  ventas-replica-1:
     image: elixir:1.15.7-otp-26-alpine
-    container_name: pagos
+    container_name: ventas-replica-1
+    volumes:
+      - ./:/app
+    working_dir: /app
+    network_mode: "host"
+    environment:
+      MIX_HOME: /app/mix_home
+      HEX_HOME: /app/hex_home
+      SERVER_TO_RUN: Elixir.Libremarket.Ventas.Server
+      AMQP_URL: amqps://oiawxlbc:v4Z6nPfJiy01FZw3QmObwAPPz90bs8t-@jackal.rmq.cloudamqp.com/oiawxlbc
+      INSECURE_AMQPS: "1"
+      ES_PRIMARIO: "0"
+      NOMBRE: ventas-replica-1
+    command: 
+      elixir --sname ventas-replica-1 --cookie ${SECRET} -S mix run --no-halt --no-compile 
+    stdin_open: true
+    tty: true
+    user: "${DOCKER_UID}:${DOCKER_GID}"
+
+  ventas-replica-2:
+    image: elixir:1.15.7-otp-26-alpine
+    container_name: ventas-replica-2
+    volumes:
+      - ./:/app
+    working_dir: /app
+    network_mode: "host"
+    environment:
+      MIX_HOME: /app/mix_home
+      HEX_HOME: /app/hex_home
+      SERVER_TO_RUN: Elixir.Libremarket.Ventas.Server
+      AMQP_URL: amqps://oiawxlbc:v4Z6nPfJiy01FZw3QmObwAPPz90bs8t-@jackal.rmq.cloudamqp.com/oiawxlbc
+      INSECURE_AMQPS: "1"
+      ES_PRIMARIO: "0"
+      NOMBRE: ventas-replica-2
+    command: 
+      elixir --sname ventas-replica-2 --cookie ${SECRET} -S mix run --no-halt --no-compile 
+    stdin_open: true
+    tty: true
+    user: "${DOCKER_UID}:${DOCKER_GID}"
+
+  pagos-primario:
+    image: elixir:1.15.7-otp-26-alpine
+    container_name: pagos-primario
     volumes:
       - ./:/app
     working_dir: /app
@@ -135,8 +179,52 @@ services:
       SERVER_TO_RUN: Elixir.Libremarket.Pagos.Server
       AMQP_URL: amqps://oiawxlbc:v4Z6nPfJiy01FZw3QmObwAPPz90bs8t-@jackal.rmq.cloudamqp.com/oiawxlbc
       INSECURE_AMQPS: "1"
+      NOMBRE: pagos-primario
+      ES_PRIMARIO: "1"
     command: 
-      elixir --sname pagos --cookie ${SECRET} -S mix run --no-halt --no-compile    # para habilitar -it# para habilitar -ithabilitar -it    # para habilitar -it    # para habilitar -it
+      elixir --sname pagos-primario --cookie ${SECRET} -S mix run --no-halt --no-compile    # para habilitar -it# para habilitar -ithabilitar -it    # para habilitar -it    # para habilitar -it
+    stdin_open: true
+    tty: true
+    user: "${DOCKER_UID}:${DOCKER_GID}"
+
+  pagos-replica-1:
+    image: elixir:1.15.7-otp-26-alpine
+    container_name: pagos-replica-1
+    volumes:
+      - ./:/app
+    working_dir: /app
+    network_mode: "host"
+    environment:
+      MIX_HOME: /app/mix_home
+      HEX_HOME: /app/hex_home
+      SERVER_TO_RUN: Elixir.Libremarket.Pagos.Server
+      AMQP_URL: amqps://oiawxlbc:v4Z6nPfJiy01FZw3QmObwAPPz90bs8t-@jackal.rmq.cloudamqp.com/oiawxlbc
+      INSECURE_AMQPS: "1"
+      NOMBRE: pagos-replica-1
+      ES_PRIMARIO: "0"
+    command: 
+      elixir --sname pagos-replica-1 --cookie ${SECRET} -S mix run --no-halt --no-compile    # para habilitar -it# para habilitar -ithabilitar -it    # para habilitar -it    # para habilitar -it
+    stdin_open: true
+    tty: true
+    user: "${DOCKER_UID}:${DOCKER_GID}"
+
+  pagos-replica-2:
+    image: elixir:1.15.7-otp-26-alpine
+    container_name: pagos-replica-2
+    volumes:
+      - ./:/app
+    working_dir: /app
+    network_mode: "host"
+    environment:
+      MIX_HOME: /app/mix_home
+      HEX_HOME: /app/hex_home
+      SERVER_TO_RUN: Elixir.Libremarket.Pagos.Server
+      AMQP_URL: amqps://oiawxlbc:v4Z6nPfJiy01FZw3QmObwAPPz90bs8t-@jackal.rmq.cloudamqp.com/oiawxlbc
+      INSECURE_AMQPS: "1"
+      NOMBRE: pagos-replica-2
+      ES_PRIMARIO: "0"
+    command: 
+      elixir --sname pagos-replica-2 --cookie ${SECRET} -S mix run --no-halt --no-compile    # para habilitar -it# para habilitar -ithabilitar -it    # para habilitar -it    # para habilitar -it
     stdin_open: true
     tty: true
     user: "${DOCKER_UID}:${DOCKER_GID}"

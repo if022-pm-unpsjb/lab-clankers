@@ -18,10 +18,12 @@ defmodule Libremarket.Ventas do
         :sin_stock
 
       %{stock: stock, precio: precio} ->
-        nuevo_producto = %{precio: precio, stock: stock - 1}
-        nuevo_state = Map.put(map_productos, id_producto, nuevo_producto)
+        nuevo_estado_producto = %{precio: precio, stock: stock - 1}
+        nuevo_state = Map.put(map_productos, id_producto, nuevo_estado_producto)
 
-        Logger.info("[VENTAS] Producto #{id_producto} reservado → nuevo stock=#{nuevo_producto.stock}, precio=#{precio}")
+        Logger.info("[VENTAS] Producto #{id_producto} reservado → nuevo stock=#{nuevo_estado_producto.stock}, precio=#{precio}")
+
+        replicate_to_replicas(id_producto, nuevo_estado_producto)  # Mandar solo el producto actualizado
 
         nuevo_state
 
@@ -40,10 +42,12 @@ defmodule Libremarket.Ventas do
         map_productos
 
       %{stock: stock, precio: precio} ->
-        nuevo_producto = %{precio: precio, stock: stock + 1}
-        nuevo_state = Map.put(map_productos, id_producto, nuevo_producto)
+        nuevo_estado_producto = %{precio: precio, stock: stock + 1}
+        nuevo_state = Map.put(map_productos, id_producto, nuevo_estado_producto)
 
-        Logger.info("[VENTAS] Producto #{id_producto} liberado → nuevo stock=#{nuevo_producto.stock}")
+        Logger.info("[VENTAS] Producto #{id_producto} liberado → nuevo stock=#{nuevo_estado_producto.stock}")
+
+        replicate_to_replicas(id_producto, nuevo_estado_producto)  # Mandar solo el producto actualizado
 
         nuevo_state
 
@@ -52,6 +56,51 @@ defmodule Libremarket.Ventas do
         map_productos
     end
   end
+
+   defp replica_names do
+    :global.registered_names()
+    |> Enum.filter(fn name ->
+      name_str = Atom.to_string(name)
+      String.starts_with?(name_str, "ventas-replica-")
+    end)
+  end
+
+  # Envia el resultado a cada réplica mediante GenServer.call
+  defp replicate_to_replicas(id_producto, nuevo_estado_producto) do
+    replicas = replica_names()
+
+    if replicas == [] do
+      Logger.warning("[Ventas] ⚠️ No hay réplicas registradas globalmente para sincronizar")
+    else
+      Enum.each(replicas, fn replica_name ->
+        Logger.info("[Ventas] Replicando producto #{id_producto} actualizado en réplica #{replica_name}")
+
+        try do
+          GenServer.call({:global, replica_name}, {:replicar_resultado, id_producto, nuevo_estado_producto})
+        catch
+          kind, reason ->
+            Logger.error("[Ventas] Error replicando en #{replica_name}: #{inspect({kind, reason})}")
+        end
+      end)
+    end
+  end
+
+
+  def inicializar_estado_replicas(productos) do
+    replicas = replica_names()
+
+    Enum.each(replicas, fn replica_name ->
+      Logger.info("[VENTAS] Inicializando estado de productos en réplica #{replica_name}")
+
+      try do
+        GenServer.call({:global, replica_name}, {:inicializar_estado, productos})
+      catch
+        kind, reason ->
+          Logger.error("[VENTAS] Error al inicializar estado en #{replica_name}: #{inspect({kind, reason})}")
+      end
+    end)
+  end
+
 end
 
 
@@ -65,7 +114,7 @@ defmodule Libremarket.Ventas.Server do
   require Logger
   alias AMQP.{Connection, Channel, Queue, Basic}
 
-  @global_name {:global, __MODULE__}
+  @global_name nil
 
   # --- NUEVO: colas ---
   @req_q  "ventas.req"
@@ -73,45 +122,57 @@ defmodule Libremarket.Ventas.Server do
 
   # ========= API =========
   def start_link(opts \\ %{}) do
-    GenServer.start_link(__MODULE__, opts, name: @global_name)
+    nombre = System.get_env("NOMBRE") |> to_string() |> String.trim() |> String.to_atom()
+
+    global_name = {:global, nombre}
+
+    # Guardamos el valor en :persistent_term (global en el VM)
+    :persistent_term.put({__MODULE__, :global_name}, global_name)
+
+    Logger.info("[Pagos.Server] Registrando global_name=#{inspect(global_name)} nodo=#{inspect(node())}")
+    GenServer.start_link(__MODULE__, opts, name: global_name)
   end
+
+  def global_name(), do: :persistent_term.get({__MODULE__, :global_name})
 
   # API in-memory (seguís pudiendo usarlas si querés):
   def reservarProducto(pid \\ @global_name, id_producto),
-    do: GenServer.call(pid, {:reservarProducto, id_producto})
+    do: GenServer.call(global_name(), {:reservarProducto, id_producto})
 
-  def listarProductos(pid \\ @global_name), do: GenServer.call(pid, :listarProductos)
+  def listarProductos(pid \\ @global_name), do: GenServer.call(global_name(), :listarProductos)
 
   def liberarProducto(pid \\ @global_name, id_producto),
-    do: GenServer.call(pid, {:liberarProducto, id_producto})
+    do: GenServer.call(global_name(), {:liberarProducto, id_producto})
 
   def get_precio(pid \\ @global_name, id_producto),
-    do: GenServer.call(pid, {:get_precio, id_producto})
+    do: GenServer.call(global_name(), {:get_precio, id_producto})
 
   # ========= Callbacks =========
   @impl true
   def init(_opts) do
     Logger.info("[VENTAS] iniciando servidor Ventas.Server...")
 
-    productos =
-      1..10
-      |> Enum.map(fn id ->
-        {id, %{precio: :rand.uniform(1000), stock: :rand.uniform(10)}}
-      end)
-      |> Enum.into(%{})
+    base_state = %{productos: %{}}
 
-    Logger.debug("[VENTAS] productos inicializados: #{inspect(productos)}")
+    if System.get_env("ES_PRIMARIO") in ["1", "true", "TRUE"] do
+      productos = 1..10 |> Enum.map(fn id -> {id, %{precio: :rand.uniform(1000), stock: :rand.uniform(10)}} end) |> Enum.into(%{})
 
-    {:ok, chan} = connect_amqp!()
-    Logger.info("[VENTAS] canal AMQP abierto (pid=#{inspect(chan.pid)})")
+      Libremarket.Ventas.inicializar_estado_replicas(productos) # para que todas las replicas tengan los mismos productos con las mismas cantidades
 
-    Queue.declare(chan, @req_q,  durable: false)
-    Queue.declare(chan, @resp_q, durable: false)
-    {:ok, _} = Basic.consume(chan, @req_q, nil, no_ack: true)
+      Logger.debug("[VENTAS] productos inicializados: #{inspect(productos)}")
+      {:ok, chan} = connect_amqp!()
+      Logger.info("[VENTAS] canal AMQP abierto (pid=#{inspect(chan.pid)})")
 
-    Logger.info("[VENTAS] escuchando cola #{@req_q}, responderá en #{@resp_q}")
+      Queue.declare(chan, @req_q,  durable: false)
+      Queue.declare(chan, @resp_q, durable: false)
+      {:ok, _} = Basic.consume(chan, @req_q, nil, no_ack: true)
 
-    {:ok, %{productos: productos, chan: chan}}
+      Logger.info("[VENTAS] escuchando cola #{@req_q}, responderá en #{@resp_q}")
+
+      {:ok, %{productos: productos, chan: chan}}
+    else
+      {:ok, base_state}
+    end
   end
 
   # ====== NEGOCIO in-memory ======
@@ -158,6 +219,23 @@ defmodule Libremarket.Ventas.Server do
     Logger.debug("[VENTAS] get_precio(#{id_producto}) -> #{precio}")
     {:reply, precio, s}
   end
+
+  @impl true
+  def handle_call({:replicar_resultado, id_producto, nuevo_estado_producto}, _from, %{productos: productos} = state) do
+    Logger.info("[VENTAS] Replicando producto #{id_producto} actualizado: #{inspect(nuevo_estado_producto)}")
+
+    # Actualizamos solo el producto específico en el mapa
+    mapa_productos = Map.put(productos, id_producto, nuevo_estado_producto)
+
+    {:reply, :ok, %{state | productos: mapa_productos}}
+  end
+
+  @impl true
+  def handle_call({:inicializar_estado, productos}, _from, _state) do
+    Logger.info("[VENTAS] Inicializando estado con productos: #{inspect(productos)}")
+    {:reply, :ok, %{productos: productos}}
+  end
+
 
   # ====== AMQP worker ======
   @impl true
