@@ -18,9 +18,39 @@ defmodule Libremarket.Envios do
   def agendar_envio(id_compra, costo) do
     id_envio = :erlang.unique_integer([:positive])
     Logger.info("Agendando envío #{id_envio} para compra #{id_compra} con costo #{costo}")
-
+    replicate_to_replicas(id_compra, costo)
     {:ok, %{id_envio: id_envio, id_compra: id_compra, costo: costo, estado: :pendiente}}
   end
+
+  # --- Helpers internos ---
+ defp replica_names do
+    :global.registered_names()
+    |> Enum.filter(fn name ->
+      name_str = Atom.to_string(name)
+      String.starts_with?(name_str, "envios-replica-")
+    end)
+  end
+
+  # Envia el resultado a cada réplica mediante GenServer.call
+  defp replicate_to_replicas(id_compra, costo) do
+    replicas = replica_names()
+
+    if replicas == [] do
+      Logger.warning("[Envios] ⚠️ No hay réplicas registradas globalmente para sincronizar")
+    else
+      Enum.each(replicas, fn replica_name ->
+        Logger.info("[Envios] GenServer.call → #{replica_name} id_compra=#{id_compra} costo=#{costo}")
+
+        try do
+          GenServer.call({:global, replica_name}, {:replicar_resultado, id_compra, costo})
+        catch
+          kind, reason ->
+            Logger.error("[Envios] Error replicando en #{replica_name}: #{inspect({kind, reason})}")
+        end
+      end)
+    end
+  end
+
 end
 
 
@@ -30,7 +60,7 @@ defmodule Libremarket.Envios.Server do
   require Logger
   alias AMQP.{Connection, Channel, Queue, Basic}
 
-  @global_name {:global, __MODULE__}
+  @global_name nil
   @req_q  "envios.req"
   @resp_q "compras.resp"
 
@@ -38,17 +68,36 @@ defmodule Libremarket.Envios.Server do
   @max_backoff 10_000
 
   # ========= API =========
-  def start_link(opts \\ %{}),
-    do: GenServer.start_link(__MODULE__, opts, name: @global_name)
+  def start_link(opts \\ %{}) do
+    # GenServer.start_link(__MODULE__, opts, name: @global_name)
+    nombre = System.get_env("NOMBRE") |> to_string() |> String.trim() |> String.to_atom()
+
+    global_name = {:global, nombre}
+
+    # Guardamos el valor en :persistent_term (global en el VM)
+    :persistent_term.put({__MODULE__, :global_name}, global_name)
+
+    Logger.info("[Envios.Server] Registrando global_name=#{inspect(global_name)} nodo=#{inspect(node())}")
+    GenServer.start_link(__MODULE__, opts, name: global_name)
+  end
+
+  def global_name(), do: :persistent_term.get({__MODULE__, :global_name})
 
   # ========= Callbacks =========
   @impl true
   def init(_opts) do
     Process.flag(:trap_exit, true)
-    state = %{conn: nil, chan: nil, backoff: @min_backoff, envios: %{}}
-    Logger.info("Envios.Server inicializado. Intentando conexión AMQP…")
-    send(self(), :connect)
-    {:ok, state}
+
+    base_state = %{envios: %{}}
+
+    if System.get_env("ES_PRIMARIO") in ["1", "true", "TRUE"] do
+      state_primario = Map.merge(base_state, %{conn: nil, chan: nil, backoff: @min_backoff})
+      Logger.info("Envios.Server inicializado. Intentando conexión AMQP…")
+      send(self(), :connect)
+      {:ok, state_primario}
+    else
+      {:ok, base_state}
+    end
   end
 
   @impl true
@@ -188,6 +237,15 @@ defmodule Libremarket.Envios.Server do
           {:error, r}
       end
     end
+  end
+
+  @impl true
+  def handle_call({:replicar_resultado, id_compra, costo}, _from, state) do
+    Logger.info("[Envios.Server] 🔁 Resultado replicado recibido id_compra=#{id_compra} costo=#{costo}")
+    nuevo = Map.update(state, :envios, %{id_compra => costo}, fn map ->
+      Map.put(map, id_compra, costo)
+    end)
+    {:reply, :ok, nuevo}
   end
 
   defp maybe_insecure_ssl(opts, url, true) do

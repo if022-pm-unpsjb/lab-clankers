@@ -89,6 +89,15 @@ defmodule Libremarket.Ventas do
   def inicializar_estado_replicas(productos) do
     replicas = replica_names()
 
+    Logger.debug("[VENTAS] Réplicas encontradas para inicializar: #{inspect(replicas)}")
+    if replicas == [] do
+      Logger.warn("[VENTAS] ⚠️ No hay réplicas registradas globalmente para inicializar estado")
+    else
+      names = replicas |> Enum.map(&Atom.to_string/1) |> Enum.join(", ")
+      Logger.info("[VENTAS] Inicializando estado en #{length(replicas)} réplica(s): #{names}")
+      Logger.info("[VENTAS] Productos a inicializar: #{inspect(productos)}")
+    end
+
     Enum.each(replicas, fn replica_name ->
       Logger.info("[VENTAS] Inicializando estado de productos en réplica #{replica_name}")
 
@@ -129,7 +138,7 @@ defmodule Libremarket.Ventas.Server do
     # Guardamos el valor en :persistent_term (global en el VM)
     :persistent_term.put({__MODULE__, :global_name}, global_name)
 
-    Logger.info("[Pagos.Server] Registrando global_name=#{inspect(global_name)} nodo=#{inspect(node())}")
+    Logger.info("[Ventas.Server] Registrando global_name=#{inspect(global_name)} nodo=#{inspect(node())}")
     GenServer.start_link(__MODULE__, opts, name: global_name)
   end
 
@@ -157,7 +166,7 @@ defmodule Libremarket.Ventas.Server do
     if System.get_env("ES_PRIMARIO") in ["1", "true", "TRUE"] do
       productos = 1..10 |> Enum.map(fn id -> {id, %{precio: :rand.uniform(1000), stock: :rand.uniform(10)}} end) |> Enum.into(%{})
 
-      Libremarket.Ventas.inicializar_estado_replicas(productos) # para que todas las replicas tengan los mismos productos con las mismas cantidades
+      inicializar_estado_replicas(productos) # para que todas las replicas tengan los mismos productos con las mismas cantidades
 
       Logger.debug("[VENTAS] productos inicializados: #{inspect(productos)}")
       {:ok, chan} = connect_amqp!()

@@ -84,9 +84,9 @@ services:
     tty: true
     user: "${DOCKER_UID}:${DOCKER_GID}"
 
-  envios:
+  envios-primario:
     image: elixir:1.15.7-otp-26-alpine
-    container_name: envios
+    container_name: envios-primario
     volumes:
       - ./:/app
     working_dir: /app
@@ -97,8 +97,52 @@ services:
       SERVER_TO_RUN: Elixir.Libremarket.Envios.Server
       AMQP_URL: amqps://oiawxlbc:v4Z6nPfJiy01FZw3QmObwAPPz90bs8t-@jackal.rmq.cloudamqp.com/oiawxlbc
       INSECURE_AMQPS: "1"
+      ES_PRIMARIO: "1"
+      NOMBRE: envios-primario
     command: 
-      elixir --sname envios --cookie ${SECRET} -S mix run --no-halt --no-compile 
+      elixir --sname envios-primario --cookie ${SECRET} -S mix run --no-halt --no-compile 
+    stdin_open: true
+    tty: true
+    user: "${DOCKER_UID}:${DOCKER_GID}"
+
+  envios-replica-1:
+    image: elixir:1.15.7-otp-26-alpine
+    container_name: envios-replica-1
+    volumes:
+      - ./:/app
+    working_dir: /app
+    network_mode: "host"
+    environment:
+      MIX_HOME: /app/mix_home
+      HEX_HOME: /app/hex_home
+      SERVER_TO_RUN: Elixir.Libremarket.Envios.Server
+      AMQP_URL: amqps://oiawxlbc:v4Z6nPfJiy01FZw3QmObwAPPz90bs8t-@jackal.rmq.cloudamqp.com/oiawxlbc
+      INSECURE_AMQPS: "1"
+      ES_PRIMARIO: "0"
+      NOMBRE: envios-replica-1
+    command: 
+      elixir --sname envios-replica-1 --cookie ${SECRET} -S mix run --no-halt --no-compile 
+    stdin_open: true
+    tty: true
+    user: "${DOCKER_UID}:${DOCKER_GID}"
+  
+  envios-replica-2:
+    image: elixir:1.15.7-otp-26-alpine
+    container_name: envios-replica-2
+    volumes:
+      - ./:/app
+    working_dir: /app
+    network_mode: "host"
+    environment:
+      MIX_HOME: /app/mix_home
+      HEX_HOME: /app/hex_home
+      SERVER_TO_RUN: Elixir.Libremarket.Envios.Server
+      AMQP_URL: amqps://oiawxlbc:v4Z6nPfJiy01FZw3QmObwAPPz90bs8t-@jackal.rmq.cloudamqp.com/oiawxlbc
+      INSECURE_AMQPS: "1"
+      ES_PRIMARIO: "0"
+      NOMBRE: envios-replica-2
+    command: 
+      elixir --sname envios-replica-2 --cookie ${SECRET} -S mix run --no-halt --no-compile 
     stdin_open: true
     tty: true
     user: "${DOCKER_UID}:${DOCKER_GID}"

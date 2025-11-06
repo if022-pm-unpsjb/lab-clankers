@@ -478,23 +478,23 @@ defmodule Libremarket.Compras.Server do
         {s2, false}
 
       {:ok, {status, compra}} ->
-        Logger.info("[ACTUALIZAR COMPRA POR INFRACCION] Compra con id_compra=#{inspect(id_compra)} encontrada. Status=#{inspect(status)}, Compra=#{inspect(compra)}")
+        Logger.info("[ACTUALIZAR COMPRA POR INFRACCION] Compra encontrada (status=#{inspect(status)}).")
 
+        # Actualizamos el campo :infraccion en la compra
         compra1 = Map.put(compra, :infraccion, infr)
-
-        # Reglas de negocio inmediatas (sin cambiar status):
-        if infr in [true, :desconocido] and compra[:reservado] == true do
-          Logger.info("[ACTUALIZAR COMPRA POR INFRACCION] La compra con id_compra=#{inspect(id_compra)} está reservada, se procederá a liberar el producto.")
-          _ = publicar_liberar_producto(s, compra[:id_producto])
-        end
-
         compras2 = Map.put(compras, id_compra, {status, compra1})
-        Logger.info("[ACTUALIZAR COMPRA POR INFRACCION] Compra con id_compra=#{inspect(id_compra)} actualizada, infracción #{inspect(infr)} aplicada.")
 
+        # Cancelamos el timer pendiente (si existía)
         s2 = cancel_pending_infraccion_timer(%{s | compras: compras2}, id_compra)
-        {s2, true}
+
+        # ✅ Nuevo: chequeamos si hay que liberar el producto
+        s3 = checkear_estado_producto(s2, id_compra)
+
+        Logger.info("[ACTUALIZAR COMPRA POR INFRACCION] Infracción #{inspect(infr)} aplicada y estado verificado.")
+        {s3, true}
     end
   end
+
 
 
   defp cancel_pending_infraccion_timer(%{pending_infraccion: pend} = s, id_compra) do
@@ -517,24 +517,27 @@ defmodule Libremarket.Compras.Server do
         {s2, false}
 
       {:ok, {status, compra}} ->
+        Logger.info("[ACTUALIZAR COMPRA POR PAGO] Actualizando pago para id_compra=#{id_compra}, autorizacion=#{inspect(ok?)}")
+
+        # Actualizamos el campo :autorizacionPago
         compra1 = Map.put(compra, :autorizacionPago, ok?)
-
-        # si falla o es :desconocido, liberá stock si lo necesitás (ya lo hacés en infracciones)
-        if ok? in [false, :desconocido] and compra[:reservado] == true do
-          _ = publicar_liberar_producto(s, compra[:id_producto])
-        end
-
         compras2 = Map.put(compras, id_compra, {status, compra1})
+
+        # Cancelamos el timer pendiente
         s2 = cancel_pending_pago_timer(%{s | compras: compras2}, id_compra)
 
-        # 🟢 Si el pago fue exitoso, agendamos el envío
+        # 🟢 Si el pago fue exitoso, publicamos solicitud de envío
         if ok? == true do
           _ = publicar_agendar_envio(s2, id_compra, compra[:precio_envio])
         end
 
-        {s2, true}
+        # ✅ Nuevo: chequeamos si hay que liberar el producto
+        s3 = checkear_estado_producto(s2, id_compra)
+
+        {s3, true}
     end
   end
+
 
   defp cancel_pending_pago_timer(%{pending_pago: pend} = s, id_compra) do
     case Map.pop(pend, id_compra) do
@@ -581,11 +584,14 @@ defmodule Libremarket.Compras.Server do
 
 
 
-
   defp aplicar_reserva_ok(%{compras: compras} = s, id_compra, precio) do
     case Map.fetch(compras, id_compra) do
-      :error -> {s, false}
+      :error ->
+        {s, false}
+
       {:ok, {status, compra}} ->
+        Logger.info("[APLICAR RESERVA OK] Compra #{id_compra}: reserva exitosa con precio #{precio}")
+
         compra1 =
           compra
           |> Map.put(:precio_producto, precio)
@@ -593,14 +599,22 @@ defmodule Libremarket.Compras.Server do
 
         compras2 = Map.put(compras, id_compra, {status, compra1})
         s2 = cancel_pending_reserva_timer(%{s | compras: compras2}, id_compra)
-        {s2, true}
+
+        # ✅ chequeo global del estado del producto
+        s3 = checkear_estado_producto(s2, id_compra)
+
+        {s3, true}
     end
   end
 
   defp aplicar_reserva_fail(%{compras: compras} = s, id_compra, motivo) do
     case Map.fetch(compras, id_compra) do
-      :error -> {s, false}
+      :error ->
+        {s, false}
+
       {:ok, {_status, compra}} ->
+        Logger.info("[APLICAR RESERVA FAIL] Compra #{id_compra}: reserva fallida por #{inspect(motivo)}")
+
         compra1 =
           compra
           |> Map.put(:reservado, false)
@@ -609,9 +623,14 @@ defmodule Libremarket.Compras.Server do
         # error terminal por reserva fallida
         compras2 = Map.put(compras, id_compra, {:error, compra1})
         s2 = cancel_pending_reserva_timer(%{s | compras: compras2}, id_compra)
-        {s2, true}
+
+        # ✅ chequeo global del estado del producto
+        s3 = checkear_estado_producto(s2, id_compra)
+
+        {s3, true}
     end
   end
+
 
   defp cancel_pending_reserva_timer(%{pending_reserva: pend} = s, id_compra) do
     case Map.pop(pend, id_compra) do
@@ -641,6 +660,36 @@ defmodule Libremarket.Compras.Server do
 
   defp publicar_agendar_envio(_s, _id_compra, _costo), do: :ok
 
+  defp checkear_estado_producto(%{chan: chan} = s, id_compra) do
+    case Map.fetch(s.compras, id_compra) do
+      :error ->
+        s
+
+      {:ok, {_status, compra}} ->
+        reservado = compra[:reservado] == true
+        infraccion = compra[:infraccion]
+        pago = compra[:autorizacionPago]
+
+        if reservado do
+          cond do
+            infraccion in [true, :desconocido] ->
+              Logger.info("[CHECK] Liberando producto #{compra[:id_producto]} por infracciÃ³n=#{inspect(infraccion)}")
+              _ = publicar_liberar_producto(s, compra[:id_producto])
+              put_in(s, [:compras, id_compra, Access.elem(1), :reservado], false)
+
+            pago in [false, :desconocido] ->
+              Logger.info("[CHECK] Liberando producto #{compra[:id_producto]} por pago=#{inspect(pago)}")
+              _ = publicar_liberar_producto(s, compra[:id_producto])
+              put_in(s, [:compras, id_compra, Access.elem(1), :reservado], false)
+
+            true ->
+              s
+          end
+        else
+          s
+        end
+    end
+  end
 
 
 
