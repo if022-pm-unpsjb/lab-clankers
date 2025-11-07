@@ -83,7 +83,19 @@ defmodule Libremarket.Envios.Server do
 
   def global_name(), do: :persistent_term.get({__MODULE__, :global_name})
 
+  def listarEnvios(pid \\ @global_name) do
+    Logger.info("[Envios.Server] listarEnvios/1 → call")
+    GenServer.call(global_name(), :listarEnvios)
+  end
+
   # ========= Callbacks =========
+
+  @impl true
+  def handle_call(:listarEnvios, _from, state) do
+    Logger.info("[Envios.Server] handle_call(:listarEnvios) → reply name=#{inspect(global_name())} node=#{inspect(node())}")
+    {:reply, state.envios, state}
+  end
+
   @impl true
   def init(_opts) do
     Process.flag(:trap_exit, true)

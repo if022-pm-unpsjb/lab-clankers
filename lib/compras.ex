@@ -140,18 +140,41 @@ defmodule Libremarket.Compras do
     end
   end
 
-end
+  def replica_names do
+    :global.registered_names()
+    |> Enum.filter(fn name ->
+    name_str = Atom.to_string(name)
+    String.starts_with?(name_str, "compras-replica-")
+    end)
+  end
 
+  # Envia el resultado a cada réplica mediante GenServer.call
+  def replicate_to_replicas(id_compra, nuevo_estado_compra) do
+    replicas = replica_names()
 
+    if replicas == [] do
+        Logger.warning("[Compras] ⚠️ No hay réplicas registradas globalmente para sincronizar")
+    else
+        Enum.each(replicas, fn replica_name ->
+          Logger.info("[Compras] Replicando producto #{id_compra} actualizado en réplica #{replica_name}")
 
-
+          try do
+              GenServer.call({:global, replica_name}, {:replicar_resultado, id_compra, nuevo_estado_compra})
+          catch
+              kind, reason ->
+              Logger.error("[Compras] Error replicando en #{replica_name}: #{inspect({kind, reason})}")
+          end
+        end)
+    end
+  end
+end # FIN DE MODULO DE COMPRAS
 
 defmodule Libremarket.Compras.Server do
   use GenServer
   require Logger
   alias AMQP.{Connection, Channel, Queue, Basic}
 
-  @global_name {:global, __MODULE__}
+  @global_name nil
 
   @req_infr_q  "infracciones.req"
   @req_pago_q  "pagos.req"
@@ -163,42 +186,52 @@ defmodule Libremarket.Compras.Server do
 
   # ========== API ==========
   def start_link(opts \\ %{}) do
-    GenServer.start_link(__MODULE__, opts, name: @global_name)
+    nombre = System.get_env("NOMBRE") |> to_string() |> String.trim() |> String.to_atom()
+
+    global_name = {:global, nombre}
+
+    # Guardamos el valor en :persistent_term (global en el VM)
+    :persistent_term.put({__MODULE__, :global_name}, global_name)
+
+    Logger.info("[Compras.Server] Registrando global_name=#{inspect(global_name)} nodo=#{inspect(node())}")
+    GenServer.start_link(__MODULE__, opts, name: global_name)
   end
 
+  def global_name(), do: :persistent_term.get({__MODULE__, :global_name})
+
   def confirmarCompra(pid \\ @global_name),
-    do: GenServer.call(pid, :confirmarCompra)
+    do: GenServer.call(global_name(), :confirmarCompra)
 
   def inicializarCompra(pid \\ @global_name),
-    do: GenServer.call(pid, :inicializarCompra)
+    do: GenServer.call(global_name(), :inicializarCompra)
 
   def seleccionarProducto(pid \\ @global_name, datos),
-    do: GenServer.call(pid, {:seleccionarProducto, datos})
+    do: GenServer.call(global_name(), {:seleccionarProducto, datos})
 
   def seleccionarMedioPago(pid \\ @global_name, datos),
-    do: GenServer.call(pid, {:seleccionarMedioPago, datos})
+    do: GenServer.call(global_name(), {:seleccionarMedioPago, datos})
 
   def seleccionarFormaEntrega(pid \\ @global_name, datos),
-    do: GenServer.call(pid, {:seleccionarFormaEntrega, datos})
+    do: GenServer.call(global_name(), {:seleccionarFormaEntrega, datos})
 
   def detectarInfraccion(pid \\ @global_name, id_compra),
-    do: GenServer.call(pid, {:detectarInfraccion, id_compra})
+    do: GenServer.call(global_name(), {:detectarInfraccion, id_compra})
 
   def autorizarPago(pid \\ @global_name, id_compra),
-    do: GenServer.call(pid, {:autorizarPago, id_compra})
+    do: GenServer.call(global_name(), {:autorizarPago, id_compra})
 
   def listarCompras(pid \\ @global_name),
-    do: GenServer.call(pid, :listarCompras)
+    do: GenServer.call(global_name(), :listarCompras)
 
   def obtenerCompra(pid \\ @global_name, id_compra),
-    do: GenServer.call(pid, {:obtenerCompra, id_compra})
+    do: GenServer.call(global_name(), {:obtenerCompra, id_compra})
 
 
   # ============== API AMQP ===================
 
 # 👇 aridad 2 (la que vas a llamar desde Compras.detectar_infraccion_state/2)
   def detectar_infraccion_amqp(id_compra, timeout_ms \\ 5_000) do
-    GenServer.cast(@global_name, {:rpc_infraccion_async, id_compra, timeout_ms})
+    GenServer.cast(global_name(), {:rpc_infraccion_async, id_compra, timeout_ms})
   end
 
   # # 👇 aridad 3 por si alguna vez querés pasar un pid/nombre distinto
@@ -208,14 +241,14 @@ defmodule Libremarket.Compras.Server do
 
 
   def autorizar_pago_amqp(id_compra, timeout_ms \\ 5_000),
-    do: GenServer.cast(@global_name, {:rpc_pago_async, id_compra, timeout_ms})
+    do: GenServer.cast(global_name(), {:rpc_pago_async, id_compra, timeout_ms})
 
   # def autorizar_pago_amqp(pid, id_compra, timeout_ms),
   #   do: GenServer.cast(pid, {:rpc_pago_async, id_compra, timeout_ms})
 
 
   def reservar_producto_amqp(id_compra, id_producto, timeout_ms \\ 5_000) do
-    GenServer.cast(@global_name, {:rpc_reserva_async, id_compra, id_producto, timeout_ms})
+    GenServer.cast(global_name(), {:rpc_reserva_async, id_compra, id_producto, timeout_ms})
   end
 
   # def reservar_producto_amqp(pid, id_compra, id_producto, timeout_ms) do
@@ -224,11 +257,11 @@ defmodule Libremarket.Compras.Server do
 
     # Publicar "calcular" (correo o retira)
   def calcular_envio_amqp(id_compra, forma_entrega, timeout_ms \\ 5_000),
-    do: GenServer.cast(@global_name, {:rpc_envio_calcular_async, id_compra, forma_entrega, timeout_ms})
+    do: GenServer.cast(global_name(), {:rpc_envio_calcular_async, id_compra, forma_entrega, timeout_ms})
 
   # Publicar "agendar"
   def agendar_envio_amqp(id_compra, costo, timeout_ms \\ 5_000),
-    do: GenServer.cast(@global_name, {:rpc_envio_agendar_async, id_compra, costo, timeout_ms})
+    do: GenServer.cast(global_name(), {:rpc_envio_agendar_async, id_compra, costo, timeout_ms})
 
 
   # ============== HANDLE CALL ===================
@@ -236,6 +269,7 @@ defmodule Libremarket.Compras.Server do
   @impl true
   def handle_call(:inicializarCompra, _from, state) do
     {id_compra, new_state} = Libremarket.Compras.inicializar_compra_state(state)
+    Libremarket.Compras.replicate_to_replicas(id_compra, Map.get(new_state.compras, id_compra))
     {:reply, id_compra, new_state}
   end
 
@@ -252,20 +286,24 @@ defmodule Libremarket.Compras.Server do
   end
 
   @impl true
-  def handle_call({:seleccionarProducto, datos}, _from, state) do
-    {reply, new_state} = Libremarket.Compras.seleccionar_producto_state(state, datos)
+  def handle_call({:seleccionarProducto, {id_compra, id_producto}}, _from, state) do
+    {reply, new_state} = Libremarket.Compras.seleccionar_producto_state(state, {id_compra, id_producto})
+    new_state = replicar_estado_compra(new_state, id_compra)
+    {:reply, reply, new_state}
+  end
+
+
+  @impl true
+  def handle_call({:seleccionarMedioPago, {id_compra, medio_pago}}, _from, state) do
+    {reply, new_state} = Libremarket.Compras.seleccionar_medio_pago_state(state, {id_compra, medio_pago})
+    new_state = replicar_estado_compra(new_state, id_compra)
     {:reply, reply, new_state}
   end
 
   @impl true
-  def handle_call({:seleccionarMedioPago, datos}, _from, state) do
-    {reply, new_state} = Libremarket.Compras.seleccionar_medio_pago_state(state, datos)
-    {:reply, reply, new_state}
-  end
-
-  @impl true
-  def handle_call({:seleccionarFormaEntrega, datos}, _from, state) do
-    {reply, new_state} = Libremarket.Compras.seleccionar_forma_entrega_state(state, datos)
+  def handle_call({:seleccionarFormaEntrega, {id_compra, forma_entrega}}, _from, state) do
+    {reply, new_state} = Libremarket.Compras.seleccionar_forma_entrega_state(state, {id_compra, forma_entrega})
+    new_state = replicar_estado_compra(new_state, id_compra)
     {:reply, reply, new_state}
   end
 
@@ -296,23 +334,45 @@ defmodule Libremarket.Compras.Server do
   # ============== HANDLE CALL AMQP ===================
 
   @impl true
-  def init(_opts) do
-    Process.flag(:trap_exit, true)
+def init(_opts) do
+  Logger.info("[COMPRAS] 🛒 Iniciando servidor Compras.Server...")
+
+  base_state = %{compras: %{}}
+
+  if System.get_env("ES_PRIMARIO") in ["1", "true", "TRUE"] do
     {:ok, chan} = connect_amqp!()
+    Logger.info("[COMPRAS] Canal AMQP abierto (pid=#{inspect(chan.pid)})")
 
     # Declarar colas (idempotente)
     Queue.declare(chan, @req_infr_q,  durable: false)
-    Queue.declare(chan, @req_pago_q, durable: false)
-    Queue.declare(chan, @resp_q, durable: false)
+    Queue.declare(chan, @req_pago_q,  durable: false)
+    Queue.declare(chan, @resp_q,      durable: false)
     Queue.declare(chan, @req_env_q,   durable: false)
     Queue.declare(chan, @req_ventas_q, durable: false)
 
     # Consumir respuestas (no_ack: true porque solo reenviamos al cliente esperando)
     {:ok, _ctag} = Basic.consume(chan, @resp_q, nil, no_ack: true)
 
-    # Estado: canal amqp + mapa de esperas por correlation_id + compras
-    {:ok, %{chan: chan, waiting: %{}, compras: %{}, pending_infraccion: %{}, pending_pago: %{}, pending_reserva: %{}, pending_envio: %{}}}
+    Logger.info("[COMPRAS] Escuchando cola #{@resp_q}")
+
+    # Estado del primario: canal + mapas de espera y pendientes
+    state = %{
+      chan: chan,
+      waiting: %{},
+      compras: %{},
+      pending_infraccion: %{},
+      pending_pago: %{},
+      pending_reserva: %{},
+      pending_envio: %{}
+    }
+
+    {:ok, state}
+    else
+      Logger.info("[COMPRAS] Nodo réplica iniciado (modo lectura, sin AMQP).")
+      {:ok, base_state}
+    end
   end
+
 
 
   @impl true
@@ -386,35 +446,41 @@ defmodule Libremarket.Compras.Server do
       # infracciones
       {:ok, %{"id_compra" => id, "infraccion" => infr}} ->
         {s2, _} = actualizar_compra_por_infraccion(s, id, infr)
+        s2 = replicar_estado_compra(s2, id)
         {s3, _} = finalize_if_ready(s2, id)
         {:noreply, s3}
 
       # pagos
       {:ok, %{"id_compra" => id, "autorizacionPago" => ok?}} ->
         {s2, _} = actualizar_compra_por_pago(s, id, ok?)
+        s2 = replicar_estado_compra(s2, id)
         {s3, _} = finalize_if_ready(s2, id)
         {:noreply, s3}
 
       # reserva OK
       {:ok, %{"type" => "reservar_res", "id_compra" => id, "id_producto" => _idp, "result" => "ok", "precio" => precio}} ->
         {s2, _} = aplicar_reserva_ok(s, id, precio)
+        s2 = replicar_estado_compra(s2, id)
         {s3, _} = finalize_if_ready(s2, id)
         {:noreply, s3}
 
       # reserva errores
       {:ok, %{"type" => "reservar_res", "id_compra" => id, "result" => "sin_stock"}} ->
         {s2, _} = aplicar_reserva_fail(s, id, :sin_stock)
+        s2 = replicar_estado_compra(s2, id)
         {s3, _} = finalize_if_ready(s2, id)
         {:noreply, s3}
 
       {:ok, %{"type" => "reservar_res", "id_compra" => id, "result" => "no_existe"}} ->
         {s2, _} = aplicar_reserva_fail(s, id, :no_existe)
+        s2 = replicar_estado_compra(s2, id)
         {s3, _} = finalize_if_ready(s2, id)
         {:noreply, s3}
 
       # calcular envío
       {:ok, %{"id_compra" => id, "precio_envio" => costo}} ->
         {s2, _} = actualizar_compra_por_envio(s, id, costo)
+        s2 = replicar_estado_compra(s2, id)
         {s3, _} = finalize_if_ready(s2, id)
         {:noreply, s3}
 
@@ -462,6 +528,26 @@ defmodule Libremarket.Compras.Server do
     end
   end
 
+
+  # @impl true
+  # def handle_call({:replicar_resultado, id_compra, nuevo_estado_compra}, _from, %{productos: productos} = state) do
+  #   Logger.info("[Compras] Replicando producto #{id_compra} actualizado: #{inspect(nuevo_estado_compra)}")
+
+  #   # Actualizamos solo el producto específico en el mapa
+  #   mapa_productos = Map.put(productos, id_compra, nuevo_estado_compra)
+
+  #   {:reply, :ok, %{state | productos: mapa_productos}}
+  # end
+
+  @impl true
+  def handle_call({:replicar_resultado, id_compra, nuevo_estado_compra}, _from, %{compras: compras} = state) do
+    Logger.info("[Compras] 🔁 Replicando compra #{id_compra} actualizada: #{inspect(nuevo_estado_compra)}")
+
+    # Actualizamos solo la compra específica en el mapa
+    mapa_compras = Map.put(compras, id_compra, nuevo_estado_compra)
+
+    {:reply, :ok, %{state | compras: mapa_compras}}
+  end
 
   defp actualizar_compra_por_infraccion(%{compras: compras} = s, id_compra, infr) do
     Logger.info("[ACTUALIZAR COMPRA POR INFRACCION] Procesando infracción para id_compra=#{inspect(id_compra)}, infracción=#{inspect(infr)}")
@@ -692,6 +778,18 @@ defmodule Libremarket.Compras.Server do
   end
 
 
+  defp replicar_estado_compra(%{compras: compras} = state, id_compra) do
+    case Map.fetch(compras, id_compra) do
+      {:ok, datos_compra} ->
+        Libremarket.Compras.replicate_to_replicas(id_compra, datos_compra)
+      :error ->
+        :noop
+    end
+
+    state
+  end
+
+
 
   # ===== AMQP administración y fallback =====
   @impl true
@@ -746,6 +844,8 @@ defmodule Libremarket.Compras.Server do
               compra2[:infraccion] == false and compra2[:autorizacionPago] == true -> :ok
               true -> :en_proceso
             end
+
+          ## SI EL ESTADO DE LA COMPRA DEJA DE ESTAR :en_proceso DUPLICAR DATOS EN LAS REPLICAS
 
           compras2 = Map.put(compras, id_compra, {new_status, compra2})
           { %{s | compras: compras2}, new_status in [:ok, :error] }

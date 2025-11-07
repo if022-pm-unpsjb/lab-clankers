@@ -166,7 +166,7 @@ defmodule Libremarket.Ventas.Server do
     if System.get_env("ES_PRIMARIO") in ["1", "true", "TRUE"] do
       productos = 1..10 |> Enum.map(fn id -> {id, %{precio: :rand.uniform(1000), stock: :rand.uniform(10)}} end) |> Enum.into(%{})
 
-      inicializar_estado_replicas(productos) # para que todas las replicas tengan los mismos productos con las mismas cantidades
+      Libremarket.Ventas.inicializar_estado_replicas(productos) # para que todas las replicas tengan los mismos productos con las mismas cantidades
 
       Logger.debug("[VENTAS] productos inicializados: #{inspect(productos)}")
       {:ok, chan} = connect_amqp!()
