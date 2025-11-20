@@ -3,15 +3,14 @@ defmodule Libremarket.Ui do
   @default_delay_ms 200
 
   def comprar(id_producto, medio_de_pago, forma_de_entrega) do
-    if :rpc.call(:"compras-primario@lucas", Libremarket.Compras.Server, :confirmarCompra, []) do
-      id_compra = :rpc.call(:"compras-primario@lucas", Libremarket.Compras.Server, :inicializarCompra, [])
+    if :rpc.call(:"compras-primario@equipoalan", Libremarket.Compras.Server, :confirmarCompra, []) do
+      id_compra = :rpc.call(:"compras-primario@equipoalan", Libremarket.Compras.Server, :inicializarCompra, [])
 
-
-      with  {:ok, _} <- :rpc.call(:"compras-primario@lucas", Libremarket.Compras.Server, :seleccionarProducto, [{id_compra, id_producto}]),
-            {:ok, _} <- :rpc.call(:"compras-primario@lucas", Libremarket.Compras.Server, :seleccionarMedioPago, [{id_compra, medio_de_pago}]),
-            {:ok, _} <- :rpc.call(:"compras-primario@lucas", Libremarket.Compras.Server, :seleccionarFormaEntrega, [{id_compra, forma_de_entrega}]),
-            {:ok, _} <- :rpc.call(:"compras-primario@lucas", Libremarket.Compras.Server, :detectarInfraccion, [id_compra]),
-            {:ok, _} <- :rpc.call(:"compras-primario@lucas", Libremarket.Compras.Server, :autorizarPago, [id_compra])
+      with  {:ok, _} <- :rpc.call(:"compras-primario@equipoalan", Libremarket.Compras.Server, :seleccionarProducto, [{id_compra, id_producto}]),
+            {:ok, _} <- :rpc.call(:"compras-primario@equipoalan", Libremarket.Compras.Server, :seleccionarMedioPago, [{id_compra, medio_de_pago}]),
+            {:ok, _} <- :rpc.call(:"compras-primario@equipoalan", Libremarket.Compras.Server, :seleccionarFormaEntrega, [{id_compra, forma_de_entrega}]),
+            {:ok, _} <- :rpc.call(:"compras-primario@equipoalan", Libremarket.Compras.Server, :detectarInfraccion, [id_compra]),
+            {:ok, _} <- :rpc.call(:"compras-primario@equipoalan", Libremarket.Compras.Server, :autorizarPago, [id_compra])
       do
         obtenerCompra(id_compra, @default_max_intentos, @default_delay_ms)
       else
@@ -26,7 +25,7 @@ defmodule Libremarket.Ui do
   # Reintenta si el estado es :en_proceso (timeout total = max_intentos * delay_ms)
   # Nuevo contrato: Libremarket.Compras.Server.obtenerCompra/1 -> {:ok, {status, info}} | {:error, :not_found}
   defp obtenerCompra(id_compra, max_intentos, delay_ms) when max_intentos >= 0 do
-    case :rpc.call(:"compras-primario@lucas", Libremarket.Compras.Server, :obtenerCompra, [id_compra]) do
+    case :rpc.call(:"compras-primario@equipoalan", Libremarket.Compras.Server, :obtenerCompra, [id_compra]) do
       {:ok, {:ok, info}} ->
         {:ok, info}
 

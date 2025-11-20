@@ -831,6 +831,7 @@ def init(_opts) do
         {s, false}
 
       {:ok, {status, compra}} ->
+        # ¿Todavía falta algún dato obligatorio para poder cerrar?
         if Enum.any?(@required_for_close, fn k -> is_nil(Map.get(compra, k)) end) do
           {s, false}
         else
@@ -845,12 +846,23 @@ def init(_opts) do
               true -> :en_proceso
             end
 
-          ## SI EL ESTADO DE LA COMPRA DEJA DE ESTAR :en_proceso DUPLICAR DATOS EN LAS REPLICAS
+          # Actualizamos el mapa de compras con el nuevo estado
+          compras2  = Map.put(compras, id_compra, {new_status, compra2})
+          new_state = %{s | compras: compras2}
 
-          compras2 = Map.put(compras, id_compra, {new_status, compra2})
-          { %{s | compras: compras2}, new_status in [:ok, :error] }
+          ## SI EL ESTADO DE LA COMPRA DEJA DE ESTAR :en_proceso DUPLICAR DATOS EN LAS REPLICAS
+          new_state =
+            if new_status in [:ok, :error] do
+              # replicamos la compra cerrada a todas las réplicas
+              replicar_estado_compra(new_state, id_compra)
+            else
+              new_state
+            end
+
+          {new_state, new_status in [:ok, :error]}
         end
     end
   end
+
 
 end
