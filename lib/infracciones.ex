@@ -10,6 +10,7 @@ defmodule Libremarket.Infracciones.Leader do
     GenServer.start_link(__MODULE__, opts, name: __MODULE__)
   end
 
+  # Pregunta dinámica: ¿este nodo es líder *ahora*?
   def leader? do
     GenServer.call(__MODULE__, :leader?)
   end
@@ -18,14 +19,13 @@ defmodule Libremarket.Infracciones.Leader do
 
   @impl true
   def init(_opts) do
-    # 1) Conectamos a ZooKeeper
     {:ok, zk} = Libremarket.ZK.connect()
 
-    # 2) Aseguramos la jerarquía de znodes
+    # Aseguramos jerarquía
     wait_for_zk(zk, @base_path)
     wait_for_zk(zk, @leader_path)
 
-    # 3) Creamos un znode efímero secuencial bajo /libremarket/infracciones/leader
+    # Creamos znode efímero secuencial
     {:ok, my_znode} =
       :erlzk.create(
         zk,
@@ -33,11 +33,10 @@ defmodule Libremarket.Infracciones.Leader do
         :ephemeral_sequential
       )
 
-    # 4) Vemos si somos el líder (el znode más chico)
-    leader? = compute_leader?(zk, my_znode)
-    IO.puts("🟣 Infracciones: soy líder? #{leader?} (#{my_znode})")
+    IO.puts("🟣 Infracciones.Leader iniciado como #{List.to_string(my_znode)}")
 
-    {:ok, %{zk: zk, my_znode: my_znode, leader?: leader?}}
+    # OJO: NO guardamos leader? en el estado, solo zk + my_znode
+    {:ok, %{zk: zk, my_znode: my_znode}}
   end
 
   defp wait_for_zk(zk, path, retries \\ 5)
@@ -56,10 +55,11 @@ defmodule Libremarket.Infracciones.Leader do
   end
 
   @impl true
-  def handle_call(:leader?, _from, state) do
-    {:reply, state.leader?, state}
+  def handle_call(:leader?, _from, %{zk: zk, my_znode: my_znode} = state) do
+    {:reply, compute_leader?(zk, my_znode), state}
   end
 
+  # === lógica de elección ===
   defp compute_leader?(zk, my_znode) do
     {:ok, children} = :erlzk.get_children(zk, @leader_path)
 
@@ -73,7 +73,17 @@ defmodule Libremarket.Infracciones.Leader do
 
     my_name == first
   end
-end
+end # Fin Infracciones.Leader
+
+
+
+
+
+
+
+
+
+
 
 
 defmodule Libremarket.Infracciones do
@@ -156,6 +166,15 @@ defmodule Libremarket.Infracciones do
 end
 
 
+
+
+
+
+
+
+
+
+
 defmodule Libremarket.Infracciones.Server do
   @moduledoc "Infracciones"
   use GenServer
@@ -170,6 +189,8 @@ defmodule Libremarket.Infracciones.Server do
   @min_backoff 500
   @max_backoff 10_000
 
+  @leader_check_interval 2_000  # ms
+
   # ===== API cliente =====
   def start_link(opts \\ %{}) do
     nombre =
@@ -180,14 +201,13 @@ defmodule Libremarket.Infracciones.Server do
 
     global_name = {:global, nombre}
 
-    # Guardamos el valor en :persistent_term (global en la VM)
     :persistent_term.put({__MODULE__, :global_name}, global_name)
 
     Logger.info(
       "[Infracciones.Server] Registrando global_name=#{inspect(global_name)} nodo=#{inspect(node())}"
     )
 
-    # 🧠 IMPORTANTE: nos aseguramos que el proceso Leader esté levantado
+    # Nos aseguramos que el Leader esté levantado
     wait_for_leader()
 
     GenServer.start_link(__MODULE__, opts, name: global_name)
@@ -199,7 +219,6 @@ defmodule Libremarket.Infracciones.Server do
     Logger.info("[Infracciones.Server] listarInfracciones/1 → call")
     GenServer.call(global_name(), :listarInfracciones)
   end
-
 
   defp wait_for_leader() do
     if Process.whereis(Libremarket.Infracciones.Leader) == nil do
@@ -219,60 +238,104 @@ defmodule Libremarket.Infracciones.Server do
     end
   end
 
-
   # ===== Callbacks =====
-@impl true
+  @impl true
   def init(_opts) do
     Process.flag(:trap_exit, true)
 
-    base_state = %{infracciones: %{}}
+    base_state = %{
+      infracciones: %{},
+      conn: nil,
+      chan: nil,
+      backoff: @min_backoff,
+      role: :unknown
+    }
 
-    # 👉 Acá antes mirabas ES_PRIMARIO; ahora miramos a ZooKeeper
-    case safe_leader_check() do
-      {:ok, true} ->
-        Logger.info("[Infracciones.Server] Soy LÍDER → preparando conexión AMQP diferida")
-        state_primario = Map.merge(base_state, %{conn: nil, chan: nil, backoff: @min_backoff})
-        send(self(), :connect)
-        {:ok, state_primario}
+    # Arrancamos el loop de verificación de rol
+    send(self(), :ensure_role)
 
-      {:ok, false} ->
-        Logger.info("[Infracciones.Server] Soy RÉPLICA → NO me conecto a AMQP")
-        {:ok, base_state}
-
-      {:error, reason} ->
-        Logger.warning(
-          "[Infracciones.Server] No pude consultar leader? (#{inspect(reason)}), asumiendo RÉPLICA"
-        )
-
-        {:ok, base_state}
-    end
+    {:ok, base_state}
   end
-
 
   @impl true
   def handle_call(:listarInfracciones, _from, state) do
-    Logger.info("[Infracciones.Server] handle_call(:listarInfracciones) → reply name=#{inspect(@global_name)} node=#{inspect(node())}")
+    Logger.info(
+      "[Infracciones.Server] handle_call(:listarInfracciones) → reply node=#{inspect(node())}"
+    )
+
     {:reply, state.infracciones, state}
   end
 
   @impl true
   def handle_call({:replicar_resultado, id_compra, infraccion?}, _from, state) do
-    Logger.info("[Infracciones.Server] 🔁 Resultado replicado recibido id_compra=#{id_compra} infraccion=#{infraccion?}")
-    nuevo = Map.update(state, :infracciones, %{id_compra => infraccion?}, fn map ->
-      Map.put(map, id_compra, infraccion?)
-    end)
+    Logger.info(
+      "[Infracciones.Server] 🔁 Resultado replicado recibido id_compra=#{id_compra} infraccion=#{infraccion?}"
+    )
+
+    nuevo =
+      Map.update(state, :infracciones, %{id_compra => infraccion?}, fn map ->
+        Map.put(map, id_compra, infraccion?)
+      end)
+
     {:reply, :ok, nuevo}
   end
 
+  # ===== Loop de rol (líder / réplica) =====
 
   @impl true
-  def handle_info(:connect, %{backoff: backoff} = state) do
-    Logger.info("[Infracciones.Server] handle_info(:connect) → intento de conexión AMQP (backoff=#{backoff}ms)")
+  def handle_info(:ensure_role, state) do
+    new_role =
+      case safe_leader_check() do
+        {:ok, true} -> :leader
+        {:ok, false} -> :replica
+        {:error, _} -> state.role  # no sabemos, nos quedamos como estábamos
+      end
+
+    state2 =
+      case {state.role, new_role} do
+        {r, r} ->
+          # no cambia el rol
+          state
+
+        {_, :leader} ->
+          Logger.info("[Infracciones.Server] 🔼 Cambio de rol → ahora soy LÍDER")
+          # si no hay conexión AMQP, iniciamos
+          send(self(), :connect)
+          %{state | role: :leader}
+
+        {:leader, :replica} ->
+          Logger.info("[Infracciones.Server] 🔽 Cambio de rol → ahora soy RÉPLICA (cierro AMQP)")
+          safe_close(state.chan)
+          safe_close(state.conn)
+          %{state | role: :replica, conn: nil, chan: nil, backoff: @min_backoff}
+
+        {:unknown, :replica} ->
+          Logger.info("[Infracciones.Server] Rol inicial detectado: RÉPLICA")
+          %{state | role: :replica}
+
+        {:unknown, :leader} ->
+          Logger.info("[Infracciones.Server] Rol inicial detectado: LÍDER")
+          send(self(), :connect)
+          %{state | role: :leader}
+      end
+
+    # volvemos a chequear dentro de un rato
+    Process.send_after(self(), :ensure_role, @leader_check_interval)
+    {:noreply, state2}
+  end
+
+  # ===== AMQP =====
+
+  @impl true
+  def handle_info(:connect, %{backoff: backoff, role: :leader} = state) do
+    Logger.info(
+      "[Infracciones.Server] handle_info(:connect) → intento de conexión AMQP (backoff=#{backoff}ms, role=leader)"
+    )
+
     case connect_amqp() do
       {:ok, conn, chan} ->
         Logger.info("[Infracciones.Server] Conectado a AMQP ✔️")
-        # Declaraciones idempotentes
-        {:ok, _} = Queue.declare(chan, @req_q,  durable: false)
+        {:ok, _} = Queue.declare(chan, @req_q, durable: false)
         {:ok, _} = Queue.declare(chan, @resp_q, durable: false)
         Logger.info("[Infracciones.Server] Declaradas colas req='#{@req_q}' resp='#{@resp_q}'")
         {:ok, _ctag} = Basic.consume(chan, @req_q, nil, no_ack: true)
@@ -281,20 +344,47 @@ defmodule Libremarket.Infracciones.Server do
         {:noreply, %{state | conn: conn, chan: chan, backoff: @min_backoff}}
 
       {:error, reason} ->
-        Logger.warning("[Infracciones.Server] AMQP no conectado (#{inspect(reason)}). Reintento en #{backoff} ms")
+        Logger.warning(
+          "[Infracciones.Server] AMQP no conectado (#{inspect(reason)}). Reintento en #{backoff} ms"
+        )
+
         Process.send_after(self(), :connect, backoff)
         {:noreply, %{state | conn: nil, chan: nil, backoff: min(backoff * 2, @max_backoff)}}
     end
   end
 
-  # Si la conexión/chán se cae, reconectamos
+  # Si recibimos :connect pero ya no somos líder → lo ignoramos
   @impl true
-  def handle_info({:DOWN, _mref, :process, pid, reason}, state) do
-    Logger.warning("[Infracciones.Server] AMQP DOWN desde pid=#{inspect(pid)} reason=#{inspect(reason)}. Reintentando…")
+  def handle_info(:connect, state) do
+    Logger.info(
+      "[Infracciones.Server] handle_info(:connect) recibido pero role=#{inspect(state.role)} → ignorado"
+    )
+
+    {:noreply, state}
+  end
+
+  @impl true
+  def handle_info({:DOWN, _mref, :process, pid, reason}, %{role: :leader} = state) do
+    Logger.warning(
+      "[Infracciones.Server] AMQP DOWN desde pid=#{inspect(pid)} reason=#{inspect(reason)}. Reintentando…"
+    )
+
     safe_close(state.chan)
     safe_close(state.conn)
     Process.send_after(self(), :connect, @min_backoff)
     {:noreply, %{state | conn: nil, chan: nil, backoff: @min_backoff}}
+  end
+
+  # Si se cae AMQP pero ya somos réplica, solo limpiamos recursos
+  @impl true
+  def handle_info({:DOWN, _mref, :process, pid, reason}, state) do
+    Logger.warning(
+      "[Infracciones.Server] AMQP DOWN (role=#{inspect(state.role)}) pid=#{inspect(pid)} reason=#{inspect(reason)}."
+    )
+
+    safe_close(state.chan)
+    safe_close(state.conn)
+    {:noreply, %{state | conn: nil, chan: nil}}
   end
 
 
