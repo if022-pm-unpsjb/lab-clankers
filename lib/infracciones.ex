@@ -1,9 +1,89 @@
+defmodule Libremarket.Infracciones.Leader do
+  use GenServer
+
+  @base_path "/libremarket/infracciones"
+  @leader_path "/libremarket/infracciones/leader"
+
+  ## API
+
+  def start_link(opts \\ []) do
+    GenServer.start_link(__MODULE__, opts, name: __MODULE__)
+  end
+
+  def leader? do
+    GenServer.call(__MODULE__, :leader?)
+  end
+
+  ## Callbacks
+
+  @impl true
+  def init(_opts) do
+    # 1) Conectamos a ZooKeeper
+    {:ok, zk} = Libremarket.ZK.connect()
+
+    # 2) Aseguramos la jerarquía de znodes
+    wait_for_zk(zk, @base_path)
+    wait_for_zk(zk, @leader_path)
+
+    # 3) Creamos un znode efímero secuencial bajo /libremarket/infracciones/leader
+    {:ok, my_znode} =
+      :erlzk.create(
+        zk,
+        @leader_path <> "/nodo-",
+        :ephemeral_sequential
+      )
+
+    # 4) Vemos si somos el líder (el znode más chico)
+    leader? = compute_leader?(zk, my_znode)
+    IO.puts("🟣 Infracciones: soy líder? #{leader?} (#{my_znode})")
+
+    {:ok, %{zk: zk, my_znode: my_znode, leader?: leader?}}
+  end
+
+  defp wait_for_zk(zk, path, retries \\ 5)
+  defp wait_for_zk(_zk, path, 0), do: raise("ZooKeeper no respondió creando #{path}")
+
+  defp wait_for_zk(zk, path, retries) do
+    case Libremarket.ZK.ensure_path(zk, path) do
+      :ok ->
+        :ok
+
+      {:error, _} ->
+        IO.puts("⚠️ reintentando crear #{path}…")
+        :timer.sleep(1_000)
+        wait_for_zk(zk, path, retries - 1)
+    end
+  end
+
+  @impl true
+  def handle_call(:leader?, _from, state) do
+    {:reply, state.leader?, state}
+  end
+
+  defp compute_leader?(zk, my_znode) do
+    {:ok, children} = :erlzk.get_children(zk, @leader_path)
+
+    sorted =
+      children
+      |> Enum.map(&List.to_string/1)
+      |> Enum.sort()
+
+    my_name = Path.basename(List.to_string(my_znode))
+    [first | _] = sorted
+
+    my_name == first
+  end
+end
+
+
 defmodule Libremarket.Infracciones do
   require Logger
 
   @doc """
-  Genera una infracción aleatoria (~30%) y replica el resultado
-  a los nodos de infracciones (réplicas) mediante RPC.
+  Genera una infracción aleatoria (~30%).
+
+  Si el nodo actual es líder (según ZooKeeper), replica el resultado
+  a los otros nodos de infracciones mediante RPC GenServer.call/3.
 
   Retorna el resultado (true/false).
   """
@@ -11,22 +91,46 @@ defmodule Libremarket.Infracciones do
     infraccion? = :rand.uniform(100) <= 30
     Logger.info("[Infracciones] id_compra=#{id_compra} → infraccion?=#{infraccion?}")
 
-    # Enviamos el resultado a las réplicas
-    replicate_to_replicas(id_compra, infraccion?)
+    # Solo el líder replica; las réplicas nunca deberían entrar acá
+    case safe_leader_check() do
+      {:ok, true} ->
+        replicate_to_replicas(id_compra, infraccion?)
+
+      {:ok, false} ->
+        Logger.info("[Infracciones] Soy réplica, no replico el resultado")
+
+      {:error, reason} ->
+        Logger.warning("[Infracciones] No pude consultar leader? (#{inspect(reason)}), no replico")
+    end
 
     infraccion?
   end
 
-  # --- Helpers internos ---
- defp replica_names do
+  # === Helpers internos ===
+
+  # Pregunta al proceso Leader en forma segura
+  defp safe_leader_check() do
+    try do
+      {:ok, Libremarket.Infracciones.Leader.leader?()}
+    catch
+      :exit, _ -> {:error, :not_alive}
+    end
+  end
+
+  # Obtiene los nombres de otras réplicas registradas globalmente.
+  # Asume que cada nodo registra su GenServer con NOMBRE = "infracciones-1|2|3"
+  defp replica_names do
+    {:global, my_name_atom} = Libremarket.Infracciones.Server.global_name()
+
     :global.registered_names()
     |> Enum.filter(fn name ->
       name_str = Atom.to_string(name)
-      String.starts_with?(name_str, "infracciones-replica-")
+      String.starts_with?(name_str, "infracciones-")
     end)
+    |> Enum.reject(&(&1 == my_name_atom))
   end
 
-  # Envia el resultado a cada réplica mediante GenServer.call
+  # Envía el resultado a cada réplica mediante GenServer.call
   defp replicate_to_replicas(id_compra, infraccion?) do
     replicas = replica_names()
 
@@ -34,20 +138,22 @@ defmodule Libremarket.Infracciones do
       Logger.warning("[Infracciones] ⚠️ No hay réplicas registradas globalmente para sincronizar")
     else
       Enum.each(replicas, fn replica_name ->
-        Logger.info("[Infracciones] GenServer.call → #{replica_name} id_compra=#{id_compra} infraccion=#{infraccion?}")
+        Logger.info(
+          "[Infracciones] GenServer.call → #{replica_name} id_compra=#{id_compra} infraccion=#{infraccion?}"
+        )
 
         try do
           GenServer.call({:global, replica_name}, {:replicar_resultado, id_compra, infraccion?})
         catch
           kind, reason ->
-            Logger.error("[Infracciones] Error replicando en #{replica_name}: #{inspect({kind, reason})}")
+            Logger.error(
+              "[Infracciones] Error replicando en #{replica_name}: #{inspect({kind, reason})}"
+            )
         end
       end)
     end
   end
-
 end
-
 
 
 defmodule Libremarket.Infracciones.Server do
@@ -58,7 +164,6 @@ defmodule Libremarket.Infracciones.Server do
 
   @global_name nil
 
-  #@global_name {:global, (System.get_env("NOMBRE") |> to_string() |> String.trim())}
   @req_q  "infracciones.req"
   @resp_q "compras.resp"
 
@@ -67,14 +172,24 @@ defmodule Libremarket.Infracciones.Server do
 
   # ===== API cliente =====
   def start_link(opts \\ %{}) do
-    nombre = System.get_env("NOMBRE") |> to_string() |> String.trim() |> String.to_atom()
+    nombre =
+      System.get_env("NOMBRE")
+      |> to_string()
+      |> String.trim()
+      |> String.to_atom()
 
     global_name = {:global, nombre}
 
-    # Guardamos el valor en :persistent_term (global en el VM)
+    # Guardamos el valor en :persistent_term (global en la VM)
     :persistent_term.put({__MODULE__, :global_name}, global_name)
 
-    Logger.info("[Infracciones.Server] Registrando global_name=#{inspect(global_name)} nodo=#{inspect(node())}")
+    Logger.info(
+      "[Infracciones.Server] Registrando global_name=#{inspect(global_name)} nodo=#{inspect(node())}"
+    )
+
+    # 🧠 IMPORTANTE: nos aseguramos que el proceso Leader esté levantado
+    wait_for_leader()
+
     GenServer.start_link(__MODULE__, opts, name: global_name)
   end
 
@@ -85,20 +200,51 @@ defmodule Libremarket.Infracciones.Server do
     GenServer.call(global_name(), :listarInfracciones)
   end
 
+
+  defp wait_for_leader() do
+    if Process.whereis(Libremarket.Infracciones.Leader) == nil do
+      IO.puts("⏳ Esperando a que arranque Libremarket.Infracciones.Leader...")
+      :timer.sleep(500)
+      wait_for_leader()
+    else
+      :ok
+    end
+  end
+
+  defp safe_leader_check() do
+    try do
+      {:ok, Libremarket.Infracciones.Leader.leader?()}
+    catch
+      :exit, _ -> {:error, :not_alive}
+    end
+  end
+
+
   # ===== Callbacks =====
-  @impl true
+@impl true
   def init(_opts) do
     Process.flag(:trap_exit, true)
 
     base_state = %{infracciones: %{}}
 
-    if System.get_env("ES_PRIMARIO") in ["1", "true", "TRUE"] do
-      Logger.info("[Infracciones.Server] init/1 → preparando conexión AMQP diferida")
-      state_primario = Map.merge(base_state, %{conn: nil, chan: nil, backoff: @min_backoff})
-      send(self(), :connect)
-      {:ok, state_primario}
-    else
-      {:ok, base_state}
+    # 👉 Acá antes mirabas ES_PRIMARIO; ahora miramos a ZooKeeper
+    case safe_leader_check() do
+      {:ok, true} ->
+        Logger.info("[Infracciones.Server] Soy LÍDER → preparando conexión AMQP diferida")
+        state_primario = Map.merge(base_state, %{conn: nil, chan: nil, backoff: @min_backoff})
+        send(self(), :connect)
+        {:ok, state_primario}
+
+      {:ok, false} ->
+        Logger.info("[Infracciones.Server] Soy RÉPLICA → NO me conecto a AMQP")
+        {:ok, base_state}
+
+      {:error, reason} ->
+        Logger.warning(
+          "[Infracciones.Server] No pude consultar leader? (#{inspect(reason)}), asumiendo RÉPLICA"
+        )
+
+        {:ok, base_state}
     end
   end
 

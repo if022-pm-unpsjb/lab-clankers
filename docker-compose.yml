@@ -1,73 +1,98 @@
+networks:
+  libremarket:
+    name: libremarket
+    driver: bridge
+
 services:
 
-  infracciones-primario:
+  infracciones-1:
     image: elixir:1.15.7-otp-26-alpine
-    container_name: infracciones-primario
+    container_name: infracciones-1
+    hostname: infracciones-1
     volumes:
       - ./:/app
     working_dir: /app
-    network_mode: "host"
+    networks:
+      - libremarket
     environment:
       MIX_HOME: /app/mix_home
       HEX_HOME: /app/hex_home
       SERVER_TO_RUN: Elixir.Libremarket.Infracciones.Server
+      LEADER_TO_RUN:  Elixir.Libremarket.Infracciones.Leader
       AMQP_URL: amqps://oiawxlbc:v4Z6nPfJiy01FZw3QmObwAPPz90bs8t-@jackal.rmq.cloudamqp.com/oiawxlbc
       INSECURE_AMQPS: "1"
-      ES_PRIMARIO: "1"
-      NOMBRE: infracciones-primario
-    command: elixir --sname infracciones-primario --cookie ${SECRET} -S mix run --no-halt --no-compile
+      NOMBRE: infracciones-1
+      ZK_HOST: "zookeeper:2181"
+    command: elixir --sname infracciones-1 --cookie ${SECRET} -S mix run --no-halt --no-compile
     stdin_open: true
     tty: true
     user: "${DOCKER_UID}:${DOCKER_GID}"
+    depends_on:
+      zookeeper:
+        condition: service_healthy
 
-  infracciones-replica-1:
+  infracciones-2:
     image: elixir:1.15.7-otp-26-alpine
-    container_name: infracciones-replica-1
+    container_name: infracciones-2
+    hostname: infracciones-2
     volumes:
       - ./:/app
     working_dir: /app
-    network_mode: "host"
+    networks:
+      - libremarket
     environment:
       MIX_HOME: /app/mix_home
       HEX_HOME: /app/hex_home
       SERVER_TO_RUN: Elixir.Libremarket.Infracciones.Server
+      LEADER_TO_RUN:  Elixir.Libremarket.Infracciones.Leader
       AMQP_URL: amqps://oiawxlbc:v4Z6nPfJiy01FZw3QmObwAPPz90bs8t-@jackal.rmq.cloudamqp.com/oiawxlbc
       INSECURE_AMQPS: "1"
-      ES_PRIMARIO: "0"
-      NOMBRE: infracciones-replica-1
-    command: elixir --sname infracciones-replica-1 --cookie ${SECRET} -S mix run --no-halt --no-compile
+      NOMBRE: infracciones-2
+      ZK_HOST: "zookeeper:2181"
+    command: elixir --sname infracciones-2 --cookie ${SECRET} -S mix run --no-halt --no-compile
     stdin_open: true
     tty: true
     user: "${DOCKER_UID}:${DOCKER_GID}"
+    depends_on:
+      zookeeper:
+        condition: service_healthy
 
-  infracciones-replica-2:
+  infracciones-3:
     image: elixir:1.15.7-otp-26-alpine
-    container_name: infracciones-replica-2
+    container_name: infracciones-3
+    hostname: infracciones-3
     volumes:
       - ./:/app
     working_dir: /app
-    network_mode: "host"
+    networks:
+      - libremarket
     environment:
       MIX_HOME: /app/mix_home
       HEX_HOME: /app/hex_home
       SERVER_TO_RUN: Elixir.Libremarket.Infracciones.Server
+      LEADER_TO_RUN:  Elixir.Libremarket.Infracciones.Leader
       AMQP_URL: amqps://oiawxlbc:v4Z6nPfJiy01FZw3QmObwAPPz90bs8t-@jackal.rmq.cloudamqp.com/oiawxlbc
       INSECURE_AMQPS: "1"
-      ES_PRIMARIO: "0"
-      NOMBRE: infracciones-replica-2
-    command: elixir --sname infracciones-replica-2 --cookie ${SECRET} -S mix run --no-halt --no-compile
+      NOMBRE: infracciones-3
+      ZK_HOST: "zookeeper:2181"
+    command: elixir --sname infracciones-3 --cookie ${SECRET} -S mix run --no-halt --no-compile
     stdin_open: true
     tty: true
     user: "${DOCKER_UID}:${DOCKER_GID}"
+    depends_on:
+      zookeeper:
+        condition: service_healthy
 
 
   compras-primario:
     image: elixir:1.15.7-otp-26-alpine
     container_name: compras-primario
+    hostname: compras-primario
     volumes:
       - ./:/app
     working_dir: /app
-    network_mode: "host"
+    networks:
+      - libremarket
     environment:
       MIX_HOME: /app/mix_home
       HEX_HOME: /app/hex_home
@@ -84,10 +109,12 @@ services:
   compras-replica-1:
     image: elixir:1.15.7-otp-26-alpine
     container_name: compras-replica-1
+    hostname: compras-replica-1
     volumes:
       - ./:/app
     working_dir: /app
-    network_mode: "host"
+    networks:
+      - libremarket
     environment:
       MIX_HOME: /app/mix_home
       HEX_HOME: /app/hex_home
@@ -104,10 +131,12 @@ services:
   compras-replica-2:
     image: elixir:1.15.7-otp-26-alpine
     container_name: compras-replica-2
+    hostname: compras-replica-2
     volumes:
       - ./:/app
     working_dir: /app
-    network_mode: "host"
+    networks:
+      - libremarket
     environment:
       MIX_HOME: /app/mix_home
       HEX_HOME: /app/hex_home
@@ -128,7 +157,8 @@ services:
     volumes:
       - ./:/app
     working_dir: /app
-    network_mode: "host"
+    networks:
+      - libremarket
     environment:
       MIX_HOME: /app/mix_home
       HEX_HOME: /app/hex_home
@@ -148,7 +178,8 @@ services:
     volumes:
       - ./:/app
     working_dir: /app
-    network_mode: "host"
+    networks:
+      - libremarket
     environment:
       MIX_HOME: /app/mix_home
       HEX_HOME: /app/hex_home
@@ -168,7 +199,8 @@ services:
     volumes:
       - ./:/app
     working_dir: /app
-    network_mode: "host"
+    networks:
+      - libremarket
     environment:
       MIX_HOME: /app/mix_home
       HEX_HOME: /app/hex_home
@@ -188,7 +220,8 @@ services:
     volumes:
       - ./:/app
     working_dir: /app
-    network_mode: "host"
+    networks:
+      - libremarket
     environment:
       MIX_HOME: /app/mix_home
       HEX_HOME: /app/hex_home
@@ -208,7 +241,8 @@ services:
     volumes:
       - ./:/app
     working_dir: /app
-    network_mode: "host"
+    networks:
+      - libremarket
     environment:
       MIX_HOME: /app/mix_home
       HEX_HOME: /app/hex_home
@@ -228,7 +262,8 @@ services:
     volumes:
       - ./:/app
     working_dir: /app
-    network_mode: "host"
+    networks:
+      - libremarket
     environment:
       MIX_HOME: /app/mix_home
       HEX_HOME: /app/hex_home
@@ -248,7 +283,8 @@ services:
     volumes:
       - ./:/app
     working_dir: /app
-    network_mode: "host"
+    networks:
+      - libremarket
     environment:
       MIX_HOME: /app/mix_home
       HEX_HOME: /app/hex_home
@@ -268,7 +304,8 @@ services:
     volumes:
       - ./:/app
     working_dir: /app
-    network_mode: "host"
+    networks:
+      - libremarket
     environment:
       MIX_HOME: /app/mix_home
       HEX_HOME: /app/hex_home
@@ -288,7 +325,8 @@ services:
     volumes:
       - ./:/app
     working_dir: /app
-    network_mode: "host"
+    networks:
+      - libremarket
     environment:
       MIX_HOME: /app/mix_home
       HEX_HOME: /app/hex_home
@@ -308,7 +346,8 @@ services:
     volumes:
       - ./:/app
     working_dir: /app
-    network_mode: "host"
+    networks:
+      - libremarket
     environment:
       MIX_HOME: /app/mix_home
       HEX_HOME: /app/hex_home
@@ -319,3 +358,20 @@ services:
     stdin_open: true
     tty: true
     user: "${DOCKER_UID}:${DOCKER_GID}"
+
+  zookeeper:
+    image: zookeeper:3.9
+    container_name: zookeeper
+    restart: unless-stopped
+    networks:
+      - libremarket
+    environment:
+      ZOO_STANDALONE_ENABLED: "true"
+      ZOO_4LW_COMMANDS_WHITELIST: "srvr,ruok,stat"
+    ports:
+      - "2181:2181"
+    healthcheck:
+      test: ["CMD", "zkServer.sh", "status"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
