@@ -1,22 +1,141 @@
+defmodule Libremarket.Pagos.Leader do
+  use GenServer
+
+  @base_path "/libremarket/pagos"
+  @leader_path "/libremarket/pagos/leader"
+
+  ## API
+
+  def start_link(opts \\ []) do
+    GenServer.start_link(__MODULE__, opts, name: __MODULE__)
+  end
+
+  # Pregunta dinámica: ¿este nodo es líder *ahora*?
+  def leader? do
+    GenServer.call(__MODULE__, :leader?)
+  end
+
+  ## Callbacks
+
+  @impl true
+  def init(_opts) do
+    {:ok, zk} = Libremarket.ZK.connect()
+
+    # Aseguramos jerarquía
+    wait_for_zk(zk, @base_path)
+    wait_for_zk(zk, @leader_path)
+
+    # Creamos znode efímero secuencial
+    {:ok, my_znode} =
+      :erlzk.create(
+        zk,
+        @leader_path <> "/nodo-",
+        :ephemeral_sequential
+      )
+
+    IO.puts("🟣 Pagos.Leader iniciado como #{List.to_string(my_znode)}")
+
+    # OJO: NO guardamos leader? en el estado, solo zk + my_znode
+    {:ok, %{zk: zk, my_znode: my_znode}}
+  end
+
+  defp wait_for_zk(zk, path, retries \\ 5)
+  defp wait_for_zk(_zk, path, 0), do: raise("ZooKeeper no respondió creando #{path}")
+
+  defp wait_for_zk(zk, path, retries) do
+    case Libremarket.ZK.ensure_path(zk, path) do
+      :ok ->
+        :ok
+
+      {:error, _} ->
+        IO.puts("⚠️ reintentando crear #{path}…")
+        :timer.sleep(1_000)
+        wait_for_zk(zk, path, retries - 1)
+    end
+  end
+
+  @impl true
+  def handle_call(:leader?, _from, %{zk: zk, my_znode: my_znode} = state) do
+    {:reply, compute_leader?(zk, my_znode), state}
+  end
+
+  # === lógica de elección ===
+  defp compute_leader?(zk, my_znode) do
+    {:ok, children} = :erlzk.get_children(zk, @leader_path)
+
+    sorted =
+      children
+      |> Enum.map(&List.to_string/1)
+      |> Enum.sort()
+
+    my_name = Path.basename(List.to_string(my_znode))
+    [first | _] = sorted
+
+    my_name == first
+  end
+end # Fin Pagos.Leader
+
+
+
+
+
+
+
+
+
+
+
+
 defmodule Libremarket.Pagos do
   require Logger
 
   def autorizarPago(id_compra) do
     # ~70% autoriza
     pago_autorizado? = :rand.uniform(100) < 70
-    IO.puts("Pago autorizado: #{pago_autorizado?}")
-    replicate_to_replicas(id_compra, pago_autorizado?)
+
+    Logger.info("[Pagos] id_compra=#{id_compra} → pago_autorizado?=#{pago_autorizado?}")
+
+    # Solo el líder replica; las réplicas nunca deberían entrar acá
+    case safe_leader_check() do
+      {:ok, true} ->
+        replicate_to_replicas(id_compra, pago_autorizado?)
+
+      {:ok, false} ->
+        Logger.info("[Pagos] Soy réplica, no replico el resultado")
+
+      {:error, reason} ->
+        Logger.warning("[Pagos] No pude consultar leader? (#{inspect(reason)}), no replico")
+
+      end
+
     pago_autorizado?
   end
 
-  # --- Helpers internos ---
- defp replica_names do
+  # === Helpers internos ===
+
+  # Pregunta al proceso Leader en forma segura
+  defp safe_leader_check() do
+    try do
+      {:ok, Libremarket.Pagos.Leader.leader?()}
+    catch
+      :exit, _ -> {:error, :not_alive}
+    end
+  end
+
+  # Obtiene los nombres de otras réplicas registradas globalmente.
+  # Asume que cada nodo registra su GenServer con NOMBRE = "pagos-1|2|3"
+  defp replica_names do
+    {:global, my_name_atom} = Libremarket.Pagos.Server.global_name()
+
     :global.registered_names()
     |> Enum.filter(fn name ->
       name_str = Atom.to_string(name)
-      String.starts_with?(name_str, "pagos-replica-")
+      String.starts_with?(name_str, "pagos-")
     end)
+    |> Enum.reject(&(&1 == my_name_atom))
   end
+
+
 
   # Envia el resultado a cada réplica mediante GenServer.call
   defp replicate_to_replicas(id_compra, pago_autorizado?) do
@@ -38,7 +157,16 @@ defmodule Libremarket.Pagos do
     end
   end
 
-end
+end # Fin Libremarket.Pagos
+
+
+
+
+
+
+
+
+
 
 defmodule Libremarket.Pagos.Server do
   @moduledoc "Worker AMQP de Pagos: consume pagos.req y publica compras.resp"
@@ -53,10 +181,16 @@ defmodule Libremarket.Pagos.Server do
   @min_backoff 500
   @max_backoff 10_000
 
+  @leader_check_interval 2_000  # ms
+
+
   # ========= API =========
   def start_link(opts \\ %{}) do
 
-    nombre = System.get_env("NOMBRE") |> to_string() |> String.trim() |> String.to_atom()
+    nombre = System.get_env("NOMBRE")
+    |> to_string()
+    |> String.trim()
+    |> String.to_atom()
 
     global_name = {:global, nombre}
 
@@ -64,44 +198,134 @@ defmodule Libremarket.Pagos.Server do
     :persistent_term.put({__MODULE__, :global_name}, global_name)
 
     Logger.info("[Pagos.Server] Registrando global_name=#{inspect(global_name)} nodo=#{inspect(node())}")
+
+    wait_for_leader()
+
+
     GenServer.start_link(__MODULE__, opts, name: global_name)
   end
 
   def global_name(), do: :persistent_term.get({__MODULE__, :global_name})
-
-
-  # Opcionales para pruebas manuales
-  def publicarResultado(pid \\ @global_name, id_compra, opts \\ []),
-    do: GenServer.call(global_name(), {:publicarResultado, id_compra, opts})
 
   def listarAutorizaciones(pid \\ @global_name) do
     Logger.info("[pagos.Server] listarAutorizaciones/1 → call")
     GenServer.call(global_name(), :listarAutorizaciones)
   end
 
+  defp wait_for_leader() do
+    if Process.whereis(Libremarket.Pagos.Leader) == nil do
+      IO.puts("⏳ Esperando a que arranque Libremarket.Pagos.Leader...")
+      :timer.sleep(500)
+      wait_for_leader()
+    else
+      :ok
+    end
+  end
+
+  defp safe_leader_check() do
+    try do
+      {:ok, Libremarket.Pagos.Leader.leader?()}
+    catch
+      :exit, _ -> {:error, :not_alive}
+    end
+  end
+
+  # Opcionales para pruebas manuales
+  def publicarResultado(pid \\ @global_name, id_compra, opts \\ []),
+    do: GenServer.call(global_name(), {:publicarResultado, id_compra, opts})
+
 
 
 
   # ========= Callbacks =========
 
+
   @impl true
   def init(_opts) do
     Process.flag(:trap_exit, true)
 
-    base_state = %{autorizacion_pagos: %{}}
+    base_state = %{
+      autorizacion_pagos: %{},
+      conn: nil,
+      chan: nil,
+      backoff: @min_backoff,
+      role: :unknown
+    }
 
-    if System.get_env("ES_PRIMARIO") in ["1", "true", "TRUE"] do
-      Logger.info("[Pagos.Server] init/1 → preparando conexión AMQP diferida")
-      state_primario = Map.merge(base_state, %{conn: nil, chan: nil, backoff: @min_backoff})
-      send(self(), :connect)
-      {:ok, state_primario}
-    else
-      {:ok, base_state}
-    end
+    Logger.info("[Pagos.Server] llegue hasta aca bien")
+
+    # Arrancamos el loop de verificación de rol
+    send(self(), :ensure_role)
+
+    Logger.info("[Pagos.Server] YA SALI DEL ENSURE ROLE")
+
+    {:ok, base_state}
+  end
+
+
+  @impl true
+  def handle_call(:listarAutorizaciones, _from, state) do
+    Logger.info("[Pagos.Server] handle_call(:listarAutorizaciones) → reply name=#{inspect(@global_name)} node=#{inspect(node())}")
+    {:reply, state.autorizacion_pagos, state}
   end
 
   @impl true
-  def handle_info(:connect, %{backoff: b} = s) do
+  def handle_call({:replicar_resultado, id_compra, autorizacion?}, _from, state) do
+    Logger.info("[Pagos.Server] 🔁 Resultado replicado recibido id_compra=#{id_compra} autorizacion=#{autorizacion?}")
+    nuevo = Map.update(state, :autorizacion_pagos, %{id_compra => autorizacion?}, fn map ->
+      Map.put(map, id_compra, autorizacion?)
+    end)
+    {:reply, :ok, nuevo}
+  end
+
+  # ===== Loop de rol (líder / réplica) =====
+
+  @impl true
+  def handle_info(:ensure_role, state) do
+
+    new_role =
+      case safe_leader_check() do
+        {:ok, true} -> :leader
+        {:ok, false} -> :replica
+        {:error, _} -> state.role  # no sabemos, nos quedamos como estábamos
+      end
+
+    state2 =
+      case {state.role, new_role} do
+        {r, r} ->
+          # no cambia el rol
+          state
+
+        {_, :leader} ->
+          Logger.info("[Pagos.Server] 🔼 Cambio de rol → ahora soy LÍDER")
+          # si no hay conexión AMQP, iniciamos
+          send(self(), :connect)
+          %{state | role: :leader}
+
+        {:leader, :replica} ->
+          Logger.info("[Pagos.Server] 🔽 Cambio de rol → ahora soy RÉPLICA (cierro AMQP)")
+          safe_close(state.chan)
+          safe_close(state.conn)
+          %{state | role: :replica, conn: nil, chan: nil, backoff: @min_backoff}
+
+        {:unknown, :replica} ->
+          Logger.info("[Pagos.Server] Rol inicial detectado: RÉPLICA")
+          %{state | role: :replica}
+
+        {:unknown, :leader} ->
+          Logger.info("[Pagos.Server] Rol inicial detectado: LÍDER")
+          send(self(), :connect)
+          %{state | role: :leader}
+      end
+
+    # volvemos a chequear dentro de un rato
+    Process.send_after(self(), :ensure_role, @leader_check_interval)
+    {:noreply, state2}
+  end
+
+ # SOLO LÍDER CONECTA
+  @impl true
+  def handle_info(:connect, %{backoff: b, role: :leader} = s) do
     case connect_amqp() do
       {:ok, conn, chan} ->
         Logger.info("Pagos.Server conectado a AMQP")
@@ -118,12 +342,39 @@ defmodule Libremarket.Pagos.Server do
     end
   end
 
+
+    # Si recibimos :connect pero ya no somos líder → lo ignoramos
   @impl true
-  def handle_info({:DOWN, _mref, :process, _pid, reason}, s) do
-    Logger.warning("Pagos AMQP DOWN: #{inspect(reason)}. Reintentando…")
-    safe_close(s.chan); safe_close(s.conn)
+  def handle_info(:connect, state) do
+    Logger.info(
+      "[Pagos.Server] handle_info(:connect) recibido pero role=#{inspect(state.role)} → ignorado"
+    )
+
+    {:noreply, state}
+  end
+
+  @impl true
+  def handle_info({:DOWN, _mref, :process, pid, reason}, %{role: :leader} = state) do
+    Logger.warning(
+      "[Pagos.Server] AMQP DOWN desde pid=#{inspect(pid)} reason=#{inspect(reason)}. Reintentando…"
+    )
+
+    safe_close(state.chan)
+    safe_close(state.conn)
     Process.send_after(self(), :connect, @min_backoff)
-    {:noreply, %{s | conn: nil, chan: nil, backoff: @min_backoff}}
+    {:noreply, %{state | conn: nil, chan: nil, backoff: @min_backoff}}
+  end
+
+  # Si se cae AMQP pero ya somos réplica, solo limpiamos recursos
+  @impl true
+  def handle_info({:DOWN, _mref, :process, pid, reason}, state) do
+    Logger.warning(
+      "[Pagos.Server] AMQP DOWN (role=#{inspect(state.role)}) pid=#{inspect(pid)} reason=#{inspect(reason)}."
+    )
+
+    safe_close(state.chan)
+    safe_close(state.conn)
+    {:noreply, %{state | conn: nil, chan: nil}}
   end
 
   # ---- negocio AMQP: recibir pagos.req -> procesar -> responder compras.resp
@@ -158,6 +409,13 @@ defmodule Libremarket.Pagos.Server do
   def handle_info(_msg, s), do: {:noreply, s}
 
 
+
+
+
+
+
+
+
   # ---- handle_call para pruebas manuales / utilitarios
 
 
@@ -174,20 +432,6 @@ defmodule Libremarket.Pagos.Server do
     {:reply, {:ok, %{id_compra: id, autorizacionPago: ok?}}, s2}
   end
 
-  @impl true
-  def handle_call(:listarAutorizaciones, _from, state) do
-    Logger.info("[Pagos.Server] handle_call(:listarAutorizaciones) → reply name=#{inspect(@global_name)} node=#{inspect(node())}")
-    {:reply, state.autorizacion_pagos, state}
-  end
-
-  @impl true
-  def handle_call({:replicar_resultado, id_compra, autorizacion?}, _from, state) do
-    Logger.info("[Pagos.Server] 🔁 Resultado replicado recibido id_compra=#{id_compra} autorizacion=#{autorizacion?}")
-    nuevo = Map.update(state, :autorizacion_pagos, %{id_compra => autorizacion?}, fn map ->
-      Map.put(map, id_compra, autorizacion?)
-    end)
-    {:reply, :ok, nuevo}
-  end
 
   # ---- helpers
   defp detect_and_store(s, id) do

@@ -89,14 +89,6 @@ end # Fin Infracciones.Leader
 defmodule Libremarket.Infracciones do
   require Logger
 
-  @doc """
-  Genera una infracción aleatoria (~30%).
-
-  Si el nodo actual es líder (según ZooKeeper), replica el resultado
-  a los otros nodos de infracciones mediante RPC GenServer.call/3.
-
-  Retorna el resultado (true/false).
-  """
   def detectar_infraccion(id_compra) do
     infraccion? = :rand.uniform(100) <= 30
     Logger.info("[Infracciones] id_compra=#{id_compra} → infraccion?=#{infraccion?}")
