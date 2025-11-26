@@ -151,9 +151,10 @@ services:
     user: "${DOCKER_UID}:${DOCKER_GID}"
 
 
-  envios-primario:
+  envios-1:
     image: elixir:1.15.7-otp-26-alpine
-    container_name: envios-primario
+    container_name: envios-1
+    hostname: envios-1
     volumes:
       - ./:/app
     working_dir: /app
@@ -163,18 +164,23 @@ services:
       MIX_HOME: /app/mix_home
       HEX_HOME: /app/hex_home
       SERVER_TO_RUN: Elixir.Libremarket.Envios.Server
+      LEADER_TO_RUN:  Elixir.Libremarket.Envios.Leader
       AMQP_URL: amqps://oiawxlbc:v4Z6nPfJiy01FZw3QmObwAPPz90bs8t-@jackal.rmq.cloudamqp.com/oiawxlbc
       INSECURE_AMQPS: "1"
-      ES_PRIMARIO: "1"
-      NOMBRE: envios-primario
-    command: elixir --sname envios-primario --cookie ${SECRET} -S mix run --no-halt --no-compile
+      NOMBRE: envios-1
+      ZK_HOST: "zookeeper:2181"
+    command: elixir --sname envios-1 --cookie ${SECRET} -S mix run --no-halt --no-compile
     stdin_open: true
     tty: true
     user: "${DOCKER_UID}:${DOCKER_GID}"
+    depends_on:
+      zookeeper:
+        condition: service_healthy
 
-  envios-replica-1:
+  envios-2:
     image: elixir:1.15.7-otp-26-alpine
-    container_name: envios-replica-1
+    container_name: envios-2
+    hostname: envios-2
     volumes:
       - ./:/app
     working_dir: /app
@@ -184,18 +190,23 @@ services:
       MIX_HOME: /app/mix_home
       HEX_HOME: /app/hex_home
       SERVER_TO_RUN: Elixir.Libremarket.Envios.Server
+      LEADER_TO_RUN:  Elixir.Libremarket.Envios.Leader
       AMQP_URL: amqps://oiawxlbc:v4Z6nPfJiy01FZw3QmObwAPPz90bs8t-@jackal.rmq.cloudamqp.com/oiawxlbc
       INSECURE_AMQPS: "1"
-      ES_PRIMARIO: "0"
-      NOMBRE: envios-replica-1
-    command: elixir --sname envios-replica-1 --cookie ${SECRET} -S mix run --no-halt --no-compile
+      NOMBRE: envios-2
+      ZK_HOST: "zookeeper:2181"
+    command: elixir --sname envios-2 --cookie ${SECRET} -S mix run --no-halt --no-compile
     stdin_open: true
     tty: true
     user: "${DOCKER_UID}:${DOCKER_GID}"
+    depends_on:
+      zookeeper:
+        condition: service_healthy
 
-  envios-replica-2:
+  envios-3:
     image: elixir:1.15.7-otp-26-alpine
-    container_name: envios-replica-2
+    container_name: envios-3
+    hostname: envios-3
     volumes:
       - ./:/app
     working_dir: /app
@@ -205,18 +216,23 @@ services:
       MIX_HOME: /app/mix_home
       HEX_HOME: /app/hex_home
       SERVER_TO_RUN: Elixir.Libremarket.Envios.Server
+      LEADER_TO_RUN:  Elixir.Libremarket.Envios.Leader
       AMQP_URL: amqps://oiawxlbc:v4Z6nPfJiy01FZw3QmObwAPPz90bs8t-@jackal.rmq.cloudamqp.com/oiawxlbc
       INSECURE_AMQPS: "1"
-      ES_PRIMARIO: "0"
-      NOMBRE: envios-replica-2
-    command: elixir --sname envios-replica-2 --cookie ${SECRET} -S mix run --no-halt --no-compile
+      NOMBRE: envios-3
+      ZK_HOST: "zookeeper:2181"
+    command: elixir --sname envios-3 --cookie ${SECRET} -S mix run --no-halt --no-compile
     stdin_open: true
     tty: true
     user: "${DOCKER_UID}:${DOCKER_GID}"
+    depends_on:
+      zookeeper:
+        condition: service_healthy
 
-  ventas-primario:
+  ventas-1:
     image: elixir:1.15.7-otp-26-alpine
-    container_name: ventas-primario
+    container_name: ventas-1
+    hostname: ventas-1
     volumes:
       - ./:/app
     working_dir: /app
@@ -226,18 +242,23 @@ services:
       MIX_HOME: /app/mix_home
       HEX_HOME: /app/hex_home
       SERVER_TO_RUN: Elixir.Libremarket.Ventas.Server
+      LEADER_TO_RUN:  Elixir.Libremarket.Ventas.Leader
       AMQP_URL: amqps://oiawxlbc:v4Z6nPfJiy01FZw3QmObwAPPz90bs8t-@jackal.rmq.cloudamqp.com/oiawxlbc
       INSECURE_AMQPS: "1"
-      ES_PRIMARIO: "1"
-      NOMBRE: ventas-primario
-    command: elixir --sname ventas-primario --cookie ${SECRET} -S mix run --no-halt --no-compile
+      NOMBRE: ventas-1
+      ZK_HOST: "zookeeper:2181"
+    command: elixir --sname ventas-1 --cookie ${SECRET} -S mix run --no-halt --no-compile
     stdin_open: true
     tty: true
     user: "${DOCKER_UID}:${DOCKER_GID}"
+    depends_on:
+      zookeeper:
+        condition: service_healthy
 
-  ventas-replica-1:
+  ventas-2:
     image: elixir:1.15.7-otp-26-alpine
-    container_name: ventas-replica-1
+    container_name: ventas-2
+    hostname: ventas-2
     volumes:
       - ./:/app
     working_dir: /app
@@ -247,18 +268,23 @@ services:
       MIX_HOME: /app/mix_home
       HEX_HOME: /app/hex_home
       SERVER_TO_RUN: Elixir.Libremarket.Ventas.Server
+      LEADER_TO_RUN:  Elixir.Libremarket.Ventas.Leader
       AMQP_URL: amqps://oiawxlbc:v4Z6nPfJiy01FZw3QmObwAPPz90bs8t-@jackal.rmq.cloudamqp.com/oiawxlbc
       INSECURE_AMQPS: "1"
-      ES_PRIMARIO: "0"
-      NOMBRE: ventas-replica-1
-    command: elixir --sname ventas-replica-1 --cookie ${SECRET} -S mix run --no-halt --no-compile
+      NOMBRE: ventas-2
+      ZK_HOST: "zookeeper:2181"
+    command: elixir --sname ventas-2 --cookie ${SECRET} -S mix run --no-halt --no-compile
     stdin_open: true
     tty: true
     user: "${DOCKER_UID}:${DOCKER_GID}"
+    depends_on:
+      zookeeper:
+        condition: service_healthy
 
-  ventas-replica-2:
+  ventas-3:
     image: elixir:1.15.7-otp-26-alpine
-    container_name: ventas-replica-2
+    container_name: ventas-3
+    hostname: ventas-3
     volumes:
       - ./:/app
     working_dir: /app
@@ -268,14 +294,18 @@ services:
       MIX_HOME: /app/mix_home
       HEX_HOME: /app/hex_home
       SERVER_TO_RUN: Elixir.Libremarket.Ventas.Server
+      LEADER_TO_RUN:  Elixir.Libremarket.Ventas.Leader
       AMQP_URL: amqps://oiawxlbc:v4Z6nPfJiy01FZw3QmObwAPPz90bs8t-@jackal.rmq.cloudamqp.com/oiawxlbc
       INSECURE_AMQPS: "1"
-      ES_PRIMARIO: "0"
-      NOMBRE: ventas-replica-2
-    command: elixir --sname ventas-replica-2 --cookie ${SECRET} -S mix run --no-halt --no-compile
+      NOMBRE: ventas-3
+      ZK_HOST: "zookeeper:2181"
+    command: elixir --sname ventas-3 --cookie ${SECRET} -S mix run --no-halt --no-compile
     stdin_open: true
     tty: true
     user: "${DOCKER_UID}:${DOCKER_GID}"
+    depends_on:
+      zookeeper:
+        condition: service_healthy
 
   pagos-1:
     image: elixir:1.15.7-otp-26-alpine

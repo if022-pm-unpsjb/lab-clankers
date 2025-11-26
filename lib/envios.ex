@@ -1,3 +1,91 @@
+defmodule Libremarket.Envios.Leader do
+   use GenServer
+
+  @base_path "/libremarket/envios"
+  @leader_path "/libremarket/envios/leader"
+
+  ## API
+
+  def start_link(opts \\ []) do
+    GenServer.start_link(__MODULE__, opts, name: __MODULE__)
+  end
+
+  # Pregunta dinámica: ¿este nodo es líder *ahora*?
+  def leader? do
+    GenServer.call(__MODULE__, :leader?)
+  end
+
+  ## Callbacks
+
+  @impl true
+  def init(_opts) do
+    {:ok, zk} = Libremarket.ZK.connect()
+
+    # Aseguramos jerarquía
+    wait_for_zk(zk, @base_path)
+    wait_for_zk(zk, @leader_path)
+
+    # Creamos znode efímero secuencial
+    {:ok, my_znode} =
+      :erlzk.create(
+        zk,
+        @leader_path <> "/nodo-",
+        :ephemeral_sequential
+      )
+
+    IO.puts("🟣 Envios.Leader iniciado como #{List.to_string(my_znode)}")
+
+    # OJO: NO guardamos leader? en el estado, solo zk + my_znode
+    {:ok, %{zk: zk, my_znode: my_znode}}
+  end
+
+  defp wait_for_zk(zk, path, retries \\ 5)
+  defp wait_for_zk(_zk, path, 0), do: raise("ZooKeeper no respondió creando #{path}")
+
+  defp wait_for_zk(zk, path, retries) do
+    case Libremarket.ZK.ensure_path(zk, path) do
+      :ok ->
+        :ok
+
+      {:error, _} ->
+        IO.puts("⚠️ reintentando crear #{path}…")
+        :timer.sleep(1_000)
+        wait_for_zk(zk, path, retries - 1)
+    end
+  end
+
+  @impl true
+  def handle_call(:leader?, _from, %{zk: zk, my_znode: my_znode} = state) do
+    {:reply, compute_leader?(zk, my_znode), state}
+  end
+
+  # === lógica de elección ===
+  defp compute_leader?(zk, my_znode) do
+    {:ok, children} = :erlzk.get_children(zk, @leader_path)
+
+    sorted =
+      children
+      |> Enum.map(&List.to_string/1)
+      |> Enum.sort()
+
+    my_name = Path.basename(List.to_string(my_znode))
+    [first | _] = sorted
+
+    my_name == first
+  end
+end # Fin Envios.Leader
+
+
+
+
+
+
+
+
+
+
+
+
 defmodule Libremarket.Envios do
   @moduledoc "Lógica de envíos (pura / sin IO)."
   require Logger
@@ -18,17 +106,33 @@ defmodule Libremarket.Envios do
   def agendar_envio(id_compra, costo) do
     id_envio = :erlang.unique_integer([:positive])
     Logger.info("Agendando envío #{id_envio} para compra #{id_compra} con costo #{costo}")
-    replicate_to_replicas(id_compra, costo)
+
+    case safe_leader_check() do
+      {:ok, true} ->
+        replicate_to_replicas(id_compra, costo)
+
+      {:ok, false} ->
+        Logger.info("[Envios] Soy réplica, no replico el resultado")
+
+      {:error, reason} ->
+        Logger.warning("[Envios] No pude consultar leader? (#{inspect(reason)}), no replico")
+    end
+
     {:ok, %{id_envio: id_envio, id_compra: id_compra, costo: costo, estado: :pendiente}}
   end
 
   # --- Helpers internos ---
- defp replica_names do
+  # Obtiene los nombres de otras réplicas registradas globalmente.
+  # Asume que cada nodo registra su GenServer con NOMBRE = "envios-1|2|3"
+  defp replica_names do
+    {:global, my_name_atom} = Libremarket.Envios.Server.global_name()
+
     :global.registered_names()
     |> Enum.filter(fn name ->
       name_str = Atom.to_string(name)
-      String.starts_with?(name_str, "envios-replica-")
+      String.starts_with?(name_str, "envios-")
     end)
+    |> Enum.reject(&(&1 == my_name_atom))
   end
 
   # Envia el resultado a cada réplica mediante GenServer.call
@@ -51,7 +155,26 @@ defmodule Libremarket.Envios do
     end
   end
 
-end
+  # === Helpers internos ===
+
+  # Pregunta al proceso Leader en forma segura
+  defp safe_leader_check() do
+    try do
+      {:ok, Libremarket.Infracciones.Leader.leader?()}
+    catch
+      :exit, _ -> {:error, :not_alive}
+    end
+  end
+
+end # Fin Envios
+
+
+
+
+
+
+
+
 
 
 defmodule Libremarket.Envios.Server do
@@ -67,10 +190,15 @@ defmodule Libremarket.Envios.Server do
   @min_backoff 500
   @max_backoff 10_000
 
+  @leader_check_interval 2_000
+
   # ========= API =========
   def start_link(opts \\ %{}) do
     # GenServer.start_link(__MODULE__, opts, name: @global_name)
-    nombre = System.get_env("NOMBRE") |> to_string() |> String.trim() |> String.to_atom()
+    nombre = System.get_env("NOMBRE")
+    |> to_string()
+    |> String.trim()
+    |> String.to_atom()
 
     global_name = {:global, nombre}
 
@@ -78,6 +206,10 @@ defmodule Libremarket.Envios.Server do
     :persistent_term.put({__MODULE__, :global_name}, global_name)
 
     Logger.info("[Envios.Server] Registrando global_name=#{inspect(global_name)} nodo=#{inspect(node())}")
+
+    # Nos aseguramos que el Leader esté levantado
+    wait_for_leader()
+
     GenServer.start_link(__MODULE__, opts, name: global_name)
   end
 
@@ -86,6 +218,24 @@ defmodule Libremarket.Envios.Server do
   def listarEnvios(pid \\ @global_name) do
     Logger.info("[Envios.Server] listarEnvios/1 → call")
     GenServer.call(global_name(), :listarEnvios)
+  end
+
+  defp wait_for_leader() do
+    if Process.whereis(Libremarket.Envios.Leader) == nil do
+      IO.puts("⏳ Esperando a que arranque Libremarket.Envios.Leader...")
+      :timer.sleep(500)
+      wait_for_leader()
+    else
+      :ok
+    end
+  end
+
+  defp safe_leader_check() do
+    try do
+      {:ok, Libremarket.Envios.Leader.leader?()}
+    catch
+      :exit, _ -> {:error, :not_alive}
+    end
   end
 
   # ========= Callbacks =========
@@ -100,20 +250,22 @@ defmodule Libremarket.Envios.Server do
   def init(_opts) do
     Process.flag(:trap_exit, true)
 
-    base_state = %{envios: %{}}
+    base_state = %{
+      envios: %{},
+      conn: nil,
+      chan: nil,
+      backoff: @min_backoff,
+      role: :unknown
+    }
 
-    if System.get_env("ES_PRIMARIO") in ["1", "true", "TRUE"] do
-      state_primario = Map.merge(base_state, %{conn: nil, chan: nil, backoff: @min_backoff})
-      Logger.info("Envios.Server inicializado. Intentando conexión AMQP…")
-      send(self(), :connect)
-      {:ok, state_primario}
-    else
-      {:ok, base_state}
-    end
+    # Arrancamos el loop de verificación de rol
+    send(self(), :ensure_role)
+
+    {:ok, base_state}
   end
 
   @impl true
-  def handle_info(:connect, %{backoff: backoff} = s) do
+  def handle_info(:connect, %{backoff: backoff, role: leader} = s) do
     case connect_amqp() do
       {:ok, conn, chan} ->
         Logger.info("Envios.Server conectado correctamente a AMQP")
@@ -129,6 +281,84 @@ defmodule Libremarket.Envios.Server do
         Process.send_after(self(), :connect, backoff)
         {:noreply, %{s | conn: nil, chan: nil, backoff: min(backoff * 2, @max_backoff)}}
     end
+  end
+
+  # Si recibimos :connect pero ya no somos líder → lo ignoramos
+  @impl true
+  def handle_info(:connect, state) do
+    Logger.info(
+      "[Envios.Server] handle_info(:connect) recibido pero role=#{inspect(state.role)} → ignorado"
+    )
+
+    {:noreply, state}
+  end
+
+  @impl true
+  def handle_info({:DOWN, _mref, :process, pid, reason}, %{role: :leader} = state) do
+    Logger.warning(
+      "[Envios.Server] AMQP DOWN desde pid=#{inspect(pid)} reason=#{inspect(reason)}. Reintentando…"
+    )
+
+    safe_close(state.chan)
+    safe_close(state.conn)
+    Process.send_after(self(), :connect, @min_backoff)
+    {:noreply, %{state | conn: nil, chan: nil, backoff: @min_backoff}}
+  end
+
+  # Si se cae AMQP pero ya somos réplica, solo limpiamos recursos
+  @impl true
+  def handle_info({:DOWN, _mref, :process, pid, reason}, state) do
+    Logger.warning(
+      "[Envios.Server] AMQP DOWN (role=#{inspect(state.role)}) pid=#{inspect(pid)} reason=#{inspect(reason)}."
+    )
+
+    safe_close(state.chan)
+    safe_close(state.conn)
+    {:noreply, %{state | conn: nil, chan: nil}}
+  end
+
+  # ===== Loop de rol (líder / réplica) =====
+
+  @impl true
+  def handle_info(:ensure_role, state) do
+    new_role =
+      case safe_leader_check() do
+        {:ok, true} -> :leader
+        {:ok, false} -> :replica
+        {:error, _} -> state.role  # no sabemos, nos quedamos como estábamos
+      end
+
+    state2 =
+      case {state.role, new_role} do
+        {r, r} ->
+          # no cambia el rol
+          state
+
+        {_, :leader} ->
+          Logger.info("[Envios.Server] 🔼 Cambio de rol → ahora soy LÍDER")
+          # si no hay conexión AMQP, iniciamos
+          send(self(), :connect)
+          %{state | role: :leader}
+
+        {:leader, :replica} ->
+          Logger.info("[Envios.Server] 🔽 Cambio de rol → ahora soy RÉPLICA (cierro AMQP)")
+          safe_close(state.chan)
+          safe_close(state.conn)
+          %{state | role: :replica, conn: nil, chan: nil, backoff: @min_backoff}
+
+        {:unknown, :replica} ->
+          Logger.info("[Envios.Server] Rol inicial detectado: RÉPLICA")
+          %{state | role: :replica}
+
+        {:unknown, :leader} ->
+          Logger.info("[Envios.Server] Rol inicial detectado: LÍDER")
+          send(self(), :connect)
+          %{state | role: :leader}
+      end
+
+    # volvemos a chequear dentro de un rato
+    Process.send_after(self(), :ensure_role, @leader_check_interval)
+    {:noreply, state2}
   end
 
   @impl true
