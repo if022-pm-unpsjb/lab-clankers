@@ -580,7 +580,7 @@ defmodule Libremarket.Ventas.Server do
     path = "/libremarket/ventas/productos"
 
     case :erlzk.get_data(zk, path) do
-      {:ok, _data, _stat} ->
+      {:ok, {_data, _stat}} ->
         :exists
 
       {:error, :no_node} ->
@@ -594,7 +594,7 @@ defmodule Libremarket.Ventas.Server do
     path = "/libremarket/ventas/productos"
 
     case :erlzk.get_data(zk, path) do
-      {:ok, data, _stat} ->
+      {:ok, {data, _stat}} ->
         {:ok, Jason.decode!(data)}
 
       {:error, :no_node} ->

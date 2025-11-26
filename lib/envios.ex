@@ -160,7 +160,7 @@ defmodule Libremarket.Envios do
   # Pregunta al proceso Leader en forma segura
   defp safe_leader_check() do
     try do
-      {:ok, Libremarket.Infracciones.Leader.leader?()}
+      {:ok, Libremarket.Envios.Leader.leader?()}
     catch
       :exit, _ -> {:error, :not_alive}
     end
