@@ -84,10 +84,10 @@ services:
         condition: service_healthy
 
 
-  compras-primario:
+  compras-1:
     image: elixir:1.15.7-otp-26-alpine
-    container_name: compras-primario
-    hostname: compras-primario
+    container_name: compras-1
+    hostname: compras-1
     volumes:
       - ./:/app
     working_dir: /app
@@ -97,19 +97,23 @@ services:
       MIX_HOME: /app/mix_home
       HEX_HOME: /app/hex_home
       SERVER_TO_RUN: Elixir.Libremarket.Compras.Server
+      LEADER_TO_RUN:  Elixir.Libremarket.Compras.Leader
       AMQP_URL: amqps://oiawxlbc:v4Z6nPfJiy01FZw3QmObwAPPz90bs8t-@jackal.rmq.cloudamqp.com/oiawxlbc
       INSECURE_AMQPS: "1"
-      ES_PRIMARIO: "1"
-      NOMBRE: compras-primario
-    command: elixir --sname compras-primario --cookie ${SECRET} -S mix run --no-halt --no-compile
+      NOMBRE: compras-1
+      ZK_HOST: "zookeeper:2181"
+    command: elixir --sname compras-1 --cookie ${SECRET} -S mix run --no-halt --no-compile # para habilitar -it# para habilitar -ithabilitar -it    # para habilitar -it    # para habilitar -it
     stdin_open: true
     tty: true
     user: "${DOCKER_UID}:${DOCKER_GID}"
+    depends_on:
+      zookeeper:
+        condition: service_healthy
 
-  compras-replica-1:
+  compras-2:
     image: elixir:1.15.7-otp-26-alpine
-    container_name: compras-replica-1
-    hostname: compras-replica-1
+    container_name: compras-2
+    hostname: compras-2
     volumes:
       - ./:/app
     working_dir: /app
@@ -119,19 +123,23 @@ services:
       MIX_HOME: /app/mix_home
       HEX_HOME: /app/hex_home
       SERVER_TO_RUN: Elixir.Libremarket.Compras.Server
+      LEADER_TO_RUN:  Elixir.Libremarket.Compras.Leader
       AMQP_URL: amqps://oiawxlbc:v4Z6nPfJiy01FZw3QmObwAPPz90bs8t-@jackal.rmq.cloudamqp.com/oiawxlbc
       INSECURE_AMQPS: "1"
-      ES_PRIMARIO: "0"
-      NOMBRE: compras-replica-1
-    command: elixir --sname compras-replica-1 --cookie ${SECRET} -S mix run --no-halt --no-compile
+      NOMBRE: compras-2
+      ZK_HOST: "zookeeper:2181"
+    command: elixir --sname compras-2 --cookie ${SECRET} -S mix run --no-halt --no-compile # para habilitar -it# para habilitar -ithabilitar -it    # para habilitar -it    # para habilitar -it
     stdin_open: true
     tty: true
     user: "${DOCKER_UID}:${DOCKER_GID}"
+    depends_on:
+      zookeeper:
+        condition: service_healthy
 
-  compras-replica-2:
+  compras-3:
     image: elixir:1.15.7-otp-26-alpine
-    container_name: compras-replica-2
-    hostname: compras-replica-2
+    container_name: compras-3
+    hostname: compras-3
     volumes:
       - ./:/app
     working_dir: /app
@@ -141,14 +149,18 @@ services:
       MIX_HOME: /app/mix_home
       HEX_HOME: /app/hex_home
       SERVER_TO_RUN: Elixir.Libremarket.Compras.Server
+      LEADER_TO_RUN:  Elixir.Libremarket.Compras.Leader
       AMQP_URL: amqps://oiawxlbc:v4Z6nPfJiy01FZw3QmObwAPPz90bs8t-@jackal.rmq.cloudamqp.com/oiawxlbc
       INSECURE_AMQPS: "1"
-      ES_PRIMARIO: "0"
-      NOMBRE: compras-replica-2
-    command: elixir --sname compras-replica-2 --cookie ${SECRET} -S mix run --no-halt --no-compile
+      NOMBRE: compras-3
+      ZK_HOST: "zookeeper:2181"
+    command: elixir --sname compras-3 --cookie ${SECRET} -S mix run --no-halt --no-compile # para habilitar -it# para habilitar -ithabilitar -it    # para habilitar -it    # para habilitar -it
     stdin_open: true
     tty: true
     user: "${DOCKER_UID}:${DOCKER_GID}"
+    depends_on:
+      zookeeper:
+        condition: service_healthy
 
 
   envios-1:

@@ -391,9 +391,9 @@ defmodule Libremarket.Ventas.Server do
   end
 
   @impl true
-  def handle_call({:inicializar_estado, productos}, _from, _state) do
+  def handle_call({:inicializar_estado, productos}, _from, state) do
     Logger.info("[VENTAS] Inicializando estado con productos: #{inspect(productos)}")
-    {:reply, :ok, %{productos: productos}}
+    {:reply, :ok, %{state | productos: productos}}
   end
 
 
@@ -484,6 +484,9 @@ defmodule Libremarket.Ventas.Server do
         {:noreply, %{s | conn: nil, chan: nil, backoff: min(b * 2, @max_backoff)}}
     end
   end
+
+
+
 
 
 
@@ -595,12 +598,21 @@ defmodule Libremarket.Ventas.Server do
 
     case :erlzk.get_data(zk, path) do
       {:ok, {data, _stat}} ->
-        {:ok, Jason.decode!(data)}
+        # Convertir claves string → integer
+        productos_json = Jason.decode!(data)
+
+        productos =
+          for {k, v} <- productos_json, into: %{} do
+            {String.to_integer(k), v}
+          end
+
+        {:ok, productos}
 
       {:error, :no_node} ->
         {:error, :not_initialized}
     end
   end
+
 
 
 
@@ -645,11 +657,7 @@ defmodule Libremarket.Ventas.Server do
     Channel.open(conn)
   end
 
-  @impl true
-  def handle_info(msg, s) do
-    Logger.debug("[VENTAS] handle_info desconocido: #{inspect(msg)}")
-    {:noreply, s}
-  end
+
 
   defp maybe_insecure_ssl(opts, url, true) do
     if String.starts_with?(url, "amqps://"),
