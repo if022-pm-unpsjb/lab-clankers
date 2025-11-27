@@ -105,7 +105,7 @@ defmodule Libremarket.Ventas do
 
         Logger.info("[VENTAS] Producto #{id_producto} reservado → nuevo stock=#{nuevo_estado_producto.stock}")
 
-        replicate_if_leader(id_producto, nuevo_estado_producto)
+        replicate_if_leader(nuevo_state)
 
         nuevo_state
 
@@ -130,8 +130,7 @@ defmodule Libremarket.Ventas do
 
         Logger.info("[VENTAS] Producto #{id_producto} liberado → nuevo stock=#{nuevo_estado_producto.stock}")
 
-        replicate_if_leader(id_producto, nuevo_estado_producto)
-
+        replicate_if_leader(nuevo_state)
         nuevo_state
 
       otro ->
@@ -145,10 +144,10 @@ defmodule Libremarket.Ventas do
   # LÓGICA DE LÍDER → SOLO EL LÍDER REPLICA
   # ============================================================
 
-  defp replicate_if_leader(id_producto, nuevo_estado_producto) do
+  defp replicate_if_leader(nuevo_state) do
     case safe_leader_check() do
       {:ok, true} ->
-        replicate_to_replicas(id_producto, nuevo_estado_producto)
+        replicate_to_replicas(nuevo_state)
 
       {:ok, false} ->
         Logger.info("[VENTAS] Soy réplica → NO replico actualizaciones")
@@ -157,6 +156,7 @@ defmodule Libremarket.Ventas do
         Logger.warning("[VENTAS] No pude consultar leader? (#{inspect(reason)}), no replico")
     end
   end
+
 
   # Igual al de Pagos
   defp safe_leader_check() do
@@ -184,17 +184,17 @@ defmodule Libremarket.Ventas do
   end
 
 
-  defp replicate_to_replicas(id_producto, nuevo_estado_producto) do
+  defp replicate_to_replicas(nuevo_state) do
     replicas = replica_names()
 
     if replicas == [] do
       Logger.warning("[VENTAS] ⚠️ No hay réplicas registradas globalmente para sincronizar")
     else
       Enum.each(replicas, fn replica_name ->
-        Logger.info("[VENTAS] Replicando producto #{id_producto} → réplica #{replica_name}")
+        Logger.info("[VENTAS] Replicando estado → réplica #{replica_name}")
 
         try do
-          GenServer.call({:global, replica_name}, {:replicar_resultado, id_producto, nuevo_estado_producto})
+          GenServer.call({:global, replica_name}, {:replicar_estado_completo, nuevo_state})
         catch
           kind, reason ->
             Logger.error("[VENTAS] Error replicando en #{replica_name}: #{inspect({kind, reason})}")
@@ -265,6 +265,40 @@ defmodule Libremarket.Ventas.Server do
     GenServer.start_link(__MODULE__, opts, name: global_name)
   end
 
+
+  defp request_state_from_leader() do
+    replicas =
+      :global.registered_names()
+      |> Enum.filter(&(String.starts_with?(Atom.to_string(&1), "ventas-")))
+
+    case Enum.find(replicas, fn name ->
+          try do
+            :rpc.call(name, Libremarket.Ventas.Leader, :leader?, [], 2000)
+          catch
+            _, _ -> false
+          end
+        end) do
+      nil ->
+        :no_leader
+
+      leader_name ->
+        try do
+          case GenServer.call({:global, leader_name}, :get_full_state, 2000) do
+            productos when is_map(productos) ->
+              {:ok, productos}
+
+            _ ->
+              {:error, :timeout}
+          end
+        catch
+          :exit, _ ->
+            {:error, :timeout}
+        end
+    end
+  end
+
+
+
   def global_name(), do: :persistent_term.get({__MODULE__, :global_name})
 
   # API in-memory (seguís pudiendo usarlas si querés):
@@ -298,6 +332,17 @@ defmodule Libremarket.Ventas.Server do
   end
 
   # ========= Callbacks =========
+
+  def handle_call(:get_full_state, _from, %{productos: productos} = state) do
+    {:reply, productos, state}
+  end
+
+
+  def handle_call({:replicar_estado_completo, productos_completos}, _from, state) do
+    Logger.info("[VENTAS] Replicando estado COMPLETO de productos")
+    {:reply, :ok, %{state | productos: productos_completos}}
+  end
+
   @impl true
   def init(_opts) do
     Logger.info("[VENTAS] iniciando servidor Ventas.Server...")
@@ -315,24 +360,6 @@ defmodule Libremarket.Ventas.Server do
 
 
     {:ok, base_state}
-    # if System.get_env("ES_PRIMARIO") in ["1", "true", "TRUE"] do
-    #   productos = 1..10 |> Enum.map(fn id -> {id, %{precio: :rand.uniform(1000), stock: :rand.uniform(10)}} end) |> Enum.into(%{})
-
-    #   Libremarket.Ventas.inicializar_estado_replicas(productos) # para que todas las replicas tengan los mismos productos con las mismas cantidades
-
-    #   Logger.debug("[VENTAS] productos inicializados: #{inspect(productos)}")
-    #   {:ok, chan} = connect_amqp!()
-    #   Logger.info("[VENTAS] canal AMQP abierto (pid=#{inspect(chan.pid)})")
-
-    #   Queue.declare(chan, @req_q,  durable: false)
-    #   Queue.declare(chan, @resp_q, durable: false)
-    #   {:ok, _} = Basic.consume(chan, @req_q, nil, no_ack: true)
-
-    #   Logger.info("[VENTAS] escuchando cola #{@req_q}, responderá en #{@resp_q}")
-
-    #   {:ok, %{productos: productos, chan: chan}}
-    # else
-    # end
   end
 
   # ====== NEGOCIO in-memory ======
@@ -415,34 +442,43 @@ defmodule Libremarket.Ventas.Server do
           # no cambia el rol
           state
 
-        {_, :leader} ->
 
+        {_, :leader} ->
           Logger.info("[Ventas.Server] 🔼 Cambio de rol → ahora soy LÍDER")
 
           {:ok, zk} = Libremarket.ZK.connect()
 
-          case zk_read_products(zk) do
-            {:ok, productos} ->
-              Logger.info("[VENTAS] Productos cargados desde ZooKeeper (persistentes)")
-              Libremarket.Ventas.inicializar_estado_replicas(productos)
+          cond do
+            # CASO 2 — Cambio de líder: ya tengo estado replicado
+            map_size(state.productos) > 0 ->
+              Logger.info("[VENTAS] Conservo productos locales (estado replicado)")
               send(self(), :connect)
-              %{state | role: :leader, productos: productos}
+              %{state | role: :leader}
 
-            {:error, :not_initialized} ->
-              # PRIMER LÍDER DEL SISTEMA → generar productos
-              productos =
-                1..10
-                |> Enum.map(fn id ->
-                  {id, %{precio: :rand.uniform(1000), stock: :rand.uniform(10)}}
-                end)
-                |> Enum.into(%{})
+            # CASO 1 — Primer líder del sistema
+            true ->
+              case zk_read_products(zk) do
+                {:ok, productos} ->
+                  Logger.info("[VENTAS] Productos cargados desde ZooKeeper (inicio del sistema)")
+                  Libremarket.Ventas.inicializar_estado_replicas(productos)
+                  send(self(), :connect)
+                  %{state | role: :leader, productos: productos}
 
-              Logger.info("[VENTAS] 🆕 Inicializando productos por primera vez: #{inspect(productos)}")
+                {:error, :not_initialized} ->
+                  productos =
+                    1..10
+                    |> Enum.map(fn id ->
+                      {id, %{precio: :rand.uniform(1000), stock: :rand.uniform(10)}}
+                    end)
+                    |> Enum.into(%{})
 
-              zk_store_initial_products_if_absent(zk, productos)
-              Libremarket.Ventas.inicializar_estado_replicas(productos)
-              send(self(), :connect)
-              %{state | role: :leader, productos: productos}
+                  Logger.info("[VENTAS] 🆕 Inicializando productos por primera vez: #{inspect(productos)}")
+
+                  zk_store_initial_products_if_absent(zk, productos)
+                  Libremarket.Ventas.inicializar_estado_replicas(productos)
+                  send(self(), :connect)
+                  %{state | role: :leader, productos: productos}
+              end
           end
 
         {:leader, :replica} ->
@@ -452,13 +488,25 @@ defmodule Libremarket.Ventas.Server do
           %{state | role: :replica, conn: nil, chan: nil, backoff: @min_backoff}
 
         {:unknown, :replica} ->
-          Logger.info("[Ventas.Server] Rol inicial detectado: RÉPLICA")
-          %{state | role: :replica}
+          case request_state_from_leader() do
+            {:ok, productos} ->
+              Logger.info("[VENTAS] Estado inicial recibido del líder")
+              %{state | role: :replica, productos: productos}
+
+            {:error, :timeout} ->
+              Logger.warning("[VENTAS] líder aún no disponible. Reintentando en el próximo ensure_role…")
+              %{state | role: :replica}
+
+            :no_leader ->
+              Logger.warning("[VENTAS] no hay líder aún. Reintentando…")
+              %{state | role: :replica}
+          end
 
         {:unknown, :leader} ->
           Logger.info("[Ventas.Server] Rol inicial detectado: LÍDER")
           send(self(), :connect)
           %{state | role: :leader}
+
       end
 
     # volvemos a chequear dentro de un rato
@@ -603,7 +651,10 @@ defmodule Libremarket.Ventas.Server do
 
         productos =
           for {k, v} <- productos_json, into: %{} do
-            {String.to_integer(k), v}
+            {String.to_integer(k),
+            for {kk, vv} <- v, into: %{} do
+              {String.to_atom(kk), vv}
+            end}
           end
 
         {:ok, productos}
