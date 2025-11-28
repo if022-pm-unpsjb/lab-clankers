@@ -230,6 +230,37 @@ defmodule Libremarket.Infracciones.Server do
     end
   end
 
+  defp request_state_from_leader() do
+    replicas =
+      :global.registered_names()
+      |> Enum.filter(&(String.starts_with?(Atom.to_string(&1), "infracciones-")))
+
+    case Enum.find(replicas, fn name ->
+          try do
+            :rpc.call(name, Libremarket.Infracciones.Leader, :leader?, [], 2000)
+          catch
+            _, _ -> false
+          end
+        end) do
+      nil ->
+        :no_leader
+
+      leader_name ->
+        try do
+          case GenServer.call({:global, leader_name}, :get_full_state, 2000) do
+            productos when is_map(productos) ->
+              {:ok, productos}
+
+            _ ->
+              {:error, :timeout}
+          end
+        catch
+          :exit, _ ->
+            {:error, :timeout}
+        end
+    end
+  end
+
   # ===== Callbacks =====
   @impl true
   def init(_opts) do
@@ -272,7 +303,12 @@ defmodule Libremarket.Infracciones.Server do
     {:reply, :ok, nuevo}
   end
 
+  def handle_call(:get_full_state, _from, %{infracciones: infracciones} = state) do
+    {:reply, infracciones, state}
+  end
+
   # ===== Loop de rol (líder / réplica) =====
+
 
   @impl true
   def handle_info(:ensure_role, state) do
@@ -280,43 +316,97 @@ defmodule Libremarket.Infracciones.Server do
       case safe_leader_check() do
         {:ok, true} -> :leader
         {:ok, false} -> :replica
-        {:error, _} -> state.role  # no sabemos, nos quedamos como estábamos
+        {:error, _} -> state.role
       end
 
     state2 =
       case {state.role, new_role} do
+
+        # ───────────────────────────────────────────────
+        # 0) No cambia el rol
+        # ───────────────────────────────────────────────
         {r, r} ->
-          # no cambia el rol
           state
 
+
+        # ───────────────────────────────────────────────
+        # 1) Cambio → ahora soy LÍDER
+        # ───────────────────────────────────────────────
         {_, :leader} ->
           Logger.info("[Infracciones.Server] 🔼 Cambio de rol → ahora soy LÍDER")
-          # si no hay conexión AMQP, iniciamos
-          send(self(), :connect)
-          %{state | role: :leader}
 
+          cond do
+            # CASO 2 — Ya tengo estado replicado: me lo quedo
+            map_size(state.infracciones) > 0 ->
+              Logger.info("[Infracciones] Conservo infracciones locales (estado ya replicado)")
+              send(self(), :connect)
+              %{state | role: :leader}
+
+            # CASO 1 — Soy el primer líder del sistema
+            true ->
+              # Podés cargar desde ZK si querés, pero por ahora mantenemos lo básico
+              Logger.info("[Infracciones] 🆕 Primer líder del sistema → inicializando estado vacío")
+
+              initial = %{}   # tu sistema de infracciones arranca vacío
+
+              # Podrías replicarlo a ZK aquí si te interesa
+              # zk_store_initial_state_if_absent(initial)
+
+              send(self(), :connect)
+              %{state | role: :leader, infracciones: initial}
+          end
+
+
+        # ───────────────────────────────────────────────
+        # 2) Cambio → ahora soy RÉPLICA
+        # ───────────────────────────────────────────────
         {:leader, :replica} ->
           Logger.info("[Infracciones.Server] 🔽 Cambio de rol → ahora soy RÉPLICA (cierro AMQP)")
           safe_close(state.chan)
           safe_close(state.conn)
-          %{state | role: :replica, conn: nil, chan: nil, backoff: @min_backoff}
 
+          %{state |
+            role: :replica,
+            conn: nil,
+            chan: nil,
+            backoff: @min_backoff
+          }
+
+
+        # ───────────────────────────────────────────────
+        # 3) Arranco como RÉPLICA (rol unknown → replica)
+        #    → Le pido el estado al líder
+        # ───────────────────────────────────────────────
         {:unknown, :replica} ->
-          Logger.info("[Infracciones.Server] Rol inicial detectado: RÉPLICA")
-          %{state | role: :replica}
+          case request_state_from_leader() do
+            {:ok, infracciones} ->
+              Logger.info("[Infracciones] Estado inicial recibido del líder")
+              %{state | role: :replica, infracciones: infracciones}
 
+            {:error, :timeout} ->
+              Logger.warning("[Infracciones] líder no responde todavía. Reintentando…")
+              %{state | role: :replica}
+
+            :no_leader ->
+              Logger.warning("[Infracciones] No hay líder. Reintentando…")
+              %{state | role: :replica}
+          end
+
+
+        # ───────────────────────────────────────────────
+        # 4) Arranco como LÍDER (sin pasar por réplica)
+        # ───────────────────────────────────────────────
         {:unknown, :leader} ->
           Logger.info("[Infracciones.Server] Rol inicial detectado: LÍDER")
           send(self(), :connect)
           %{state | role: :leader}
       end
 
-    # volvemos a chequear dentro de un rato
+    # Reprogramamos el próximo chequeo
     Process.send_after(self(), :ensure_role, @leader_check_interval)
     {:noreply, state2}
   end
 
-  # ===== AMQP =====
 
   @impl true
   def handle_info(:connect, %{backoff: backoff, role: :leader} = state) do
