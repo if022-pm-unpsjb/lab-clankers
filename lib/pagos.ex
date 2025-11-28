@@ -235,7 +235,36 @@ defmodule Libremarket.Pagos.Server do
     do: GenServer.call(global_name(), {:publicarResultado, id_compra, opts})
 
 
+  defp request_state_from_leader() do
+    replicas =
+      :global.registered_names()
+      |> Enum.filter(&(String.starts_with?(Atom.to_string(&1), "pagos-")))
 
+    case Enum.find(replicas, fn name ->
+          try do
+            :rpc.call(name, Libremarket.Pagos.Leader, :leader?, [], 2000)
+          catch
+            _, _ -> false
+          end
+        end) do
+      nil ->
+        :no_leader
+
+      leader_name ->
+        try do
+          case GenServer.call({:global, leader_name}, :get_full_state, 2000) do
+            productos when is_map(productos) ->
+              {:ok, productos}
+
+            _ ->
+              {:error, :timeout}
+          end
+        catch
+          :exit, _ ->
+            {:error, :timeout}
+        end
+    end
+  end
 
   # ========= Callbacks =========
 
@@ -278,47 +307,98 @@ defmodule Libremarket.Pagos.Server do
     {:reply, :ok, nuevo}
   end
 
+  def handle_call(:get_full_state, _from, %{autorizacion_pagos: autorizacion_pagos} = state) do
+    {:reply, autorizacion_pagos, state}
+  end
   # ===== Loop de rol (líder / réplica) =====
 
   @impl true
   def handle_info(:ensure_role, state) do
-
     new_role =
       case safe_leader_check() do
         {:ok, true} -> :leader
         {:ok, false} -> :replica
-        {:error, _} -> state.role  # no sabemos, nos quedamos como estábamos
+        {:error, _} -> state.role
       end
 
     state2 =
       case {state.role, new_role} do
+
+        # ───────────────────────────────────────────────
+        # 0) No cambia el rol
+        # ───────────────────────────────────────────────
         {r, r} ->
-          # no cambia el rol
           state
 
+
+        # ───────────────────────────────────────────────
+        # 1) Cambio → ahora soy LÍDER
+        # ───────────────────────────────────────────────
         {_, :leader} ->
           Logger.info("[Pagos.Server] 🔼 Cambio de rol → ahora soy LÍDER")
-          # si no hay conexión AMQP, iniciamos
-          send(self(), :connect)
-          %{state | role: :leader}
 
+          cond do
+            # CASO 2 — Ya tengo estado replicado
+            map_size(state.autorizacion_pagos) > 0 ->
+              Logger.info("[Pagos] Conservo estado local (réplica ya sincronizada)")
+              send(self(), :connect)
+              %{state | role: :leader}
+
+            # CASO 1 — Primer líder del sistema
+            true ->
+              Logger.info("[Pagos] 🆕 Primer líder → inicializando estado vacío")
+
+              initial = %{}
+
+              send(self(), :connect)
+              %{state | role: :leader, autorizacion_pagos: initial}
+          end
+
+
+        # ───────────────────────────────────────────────
+        # 2) Cambio líder → réplica
+        # ───────────────────────────────────────────────
         {:leader, :replica} ->
           Logger.info("[Pagos.Server] 🔽 Cambio de rol → ahora soy RÉPLICA (cierro AMQP)")
           safe_close(state.chan)
           safe_close(state.conn)
-          %{state | role: :replica, conn: nil, chan: nil, backoff: @min_backoff}
 
+          %{state |
+            role: :replica,
+            conn: nil,
+            chan: nil,
+            backoff: @min_backoff
+          }
+
+
+        # ───────────────────────────────────────────────
+        # 3) Inicial → réplica → sincronizar estado del líder
+        # ───────────────────────────────────────────────
         {:unknown, :replica} ->
-          Logger.info("[Pagos.Server] Rol inicial detectado: RÉPLICA")
-          %{state | role: :replica}
+          case request_state_from_leader() do
+            {:ok, pagos} ->
+              Logger.info("[Pagos] Estado inicial recibido del líder")
+              %{state | role: :replica, autorizacion_pagos: pagos}
 
+            {:error, :timeout} ->
+              Logger.warning("[Pagos] líder no responde todavía → reintentando…")
+              %{state | role: :replica}
+
+            :no_leader ->
+              Logger.warning("[Pagos] aún no hay líder → reintentando…")
+              %{state | role: :replica}
+          end
+
+
+        # ───────────────────────────────────────────────
+        # 4) Inicial → líder (caso poco común pero válido)
+        # ───────────────────────────────────────────────
         {:unknown, :leader} ->
           Logger.info("[Pagos.Server] Rol inicial detectado: LÍDER")
           send(self(), :connect)
           %{state | role: :leader}
       end
 
-    # volvemos a chequear dentro de un rato
     Process.send_after(self(), :ensure_role, @leader_check_interval)
     {:noreply, state2}
   end

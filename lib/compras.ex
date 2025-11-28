@@ -414,6 +414,36 @@ defmodule Libremarket.Compras.Server do
     do: GenServer.call(global_name(), {:obtenerCompra, id_compra})
 
 
+  defp request_state_from_leader() do
+    replicas =
+      :global.registered_names()
+      |> Enum.filter(&(String.starts_with?(Atom.to_string(&1), "compras-")))
+
+    case Enum.find(replicas, fn name ->
+          try do
+            :rpc.call(name, Libremarket.Compras.Leader, :leader?, [], 2000)
+          catch
+            _, _ -> false
+          end
+        end) do
+      nil ->
+        :no_leader
+
+      leader_name ->
+        try do
+          case GenServer.call({:global, leader_name}, :get_full_state, 2000) do
+            productos when is_map(productos) ->
+              {:ok, productos}
+
+            _ ->
+              {:error, :timeout}
+          end
+        catch
+          :exit, _ ->
+            {:error, :timeout}
+        end
+    end
+  end
   # ============== API AMQP ===================
 
   defp wait_for_leader() do
@@ -470,6 +500,10 @@ defmodule Libremarket.Compras.Server do
 
 
   # ============== HANDLE CALL ===================
+
+  def handle_call(:get_full_state, _from, %{compras: compras} = state) do
+    {:reply, compras, state}
+  end
 
   @impl true
   def handle_call(:inicializarCompra, _from, state) do
@@ -567,43 +601,91 @@ defmodule Libremarket.Compras.Server do
   def handle_info(:ensure_role, state) do
     new_role =
       case safe_leader_check() do
-        {:ok, true} -> :leader
+        {:ok, true}  -> :leader
         {:ok, false} -> :replica
-        {:error, _} -> state.role  # no sabemos, nos quedamos como estábamos
+        {:error, _}  -> state.role
       end
 
     state2 =
       case {state.role, new_role} do
+
+        # ───────────────────────────────────────────────
+        # 0) MISMO ROL → no hacemos nada
+        # ───────────────────────────────────────────────
         {r, r} ->
-          # no cambia el rol
           state
 
+
+        # ───────────────────────────────────────────────
+        # 1) Cambio → AHORA SOY LÍDER
+        # ───────────────────────────────────────────────
         {_, :leader} ->
           Logger.info("[Compras.Server] 🔼 Cambio de rol → ahora soy LÍDER")
-          # si no hay conexión AMQP, iniciamos
-          send(self(), :connect)
-          %{state | role: :leader}
 
+          cond do
+            # CASO 2 — Ya era réplica y tenía estado sincronizado
+            map_size(state.compras) > 0 ->
+              Logger.info("[Compras] Conservo estado local (réplica ya sincronizada)")
+              send(self(), :connect)
+              %{state | role: :leader}
+
+            # CASO 1 — Primer líder del sistema: arranca con compras vacías
+            true ->
+              Logger.info("[Compras] 🆕 Primer líder → inicializando estado vacío")
+              initial = %{}
+              send(self(), :connect)
+              %{state | role: :leader, compras: initial}
+          end
+
+
+        # ───────────────────────────────────────────────
+        # 2) LÍDER → RÉPLICA → cerrar AMQP
+        # ───────────────────────────────────────────────
         {:leader, :replica} ->
-          Logger.info("[Comp.Server] 🔽 Cambio de rol → ahora soy RÉPLICA (cierro AMQP)")
+          Logger.info("[Compras.Server] 🔽 Cambio de rol → ahora soy RÉPLICA (cierro AMQP)")
           safe_close(state.chan)
           safe_close(state.conn)
-          %{state | role: :replica, conn: nil, chan: nil, backoff: @min_backoff}
 
+          %{state |
+            role: :replica,
+            conn: nil,
+            chan: nil,
+            backoff: @min_backoff
+          }
+
+
+        # ───────────────────────────────────────────────
+        # 3) unknown → replica → debo PEDIR EL ESTADO AL LÍDER
+        # ───────────────────────────────────────────────
         {:unknown, :replica} ->
-          Logger.info("[Compras.Server] Rol inicial detectado: RÉPLICA")
-          %{state | role: :replica}
+          case request_state_from_leader() do
+            {:ok, compras} ->
+              Logger.info("[Compras] Estado inicial recibido del líder")
+              %{state | role: :replica, compras: compras}
 
+            {:error, :timeout} ->
+              Logger.warning("[Compras] líder no responde aún → reintentando…")
+              %{state | role: :replica}
+
+            :no_leader ->
+              Logger.warning("[Compras] no hay líder disponible → reintentando…")
+              %{state | role: :replica}
+          end
+
+
+        # ───────────────────────────────────────────────
+        # 4) unknown → líder (inicio rápido)
+        # ───────────────────────────────────────────────
         {:unknown, :leader} ->
           Logger.info("[Compras.Server] Rol inicial detectado: LÍDER")
           send(self(), :connect)
           %{state | role: :leader}
       end
 
-    # volvemos a chequear dentro de un rato
     Process.send_after(self(), :ensure_role, @leader_check_interval)
     {:noreply, state2}
   end
+
 
   @impl true
   def handle_info(:connect, %{backoff: b, role: :leader} = s) do
