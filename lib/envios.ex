@@ -242,11 +242,11 @@ defmodule Libremarket.Envios.Server do
   defp request_state_from_leader() do
     replicas =
       :global.registered_names()
-      |> Enum.filter(&(String.starts_with?(Atom.to_string(&1), "envios-")))
+      |> Enum.filter(&(String.starts_with?(Atom.to_string(&1), "infracciones-")))
 
     case Enum.find(replicas, fn name ->
           try do
-            :rpc.call(name, Libremarket.Envios.Leader, :leader?, [], 2000)
+            :rpc.call(name, Libremarket.Infracciones.Leader, :leader?, [], 2000)
           catch
             _, _ -> false
           end
@@ -256,9 +256,9 @@ defmodule Libremarket.Envios.Server do
 
       leader_name ->
         try do
-          case GenServer.call({:global, leader_name}, :get_full_state, 8000) do
-            envios when is_map(envios) ->
-              {:ok, envios}
+          case GenServer.call({:global, leader_name}, :get_full_state, 2000) do
+            productos when is_map(productos) ->
+              {:ok, productos}
 
             _ ->
               {:error, :timeout}
@@ -449,9 +449,6 @@ defmodule Libremarket.Envios.Server do
   end
 
 
-
-
-  end
 
 
 
